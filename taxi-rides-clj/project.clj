@@ -5,7 +5,7 @@
                  [org.clojure/data.csv "0.1.3"]
                  [cc.qbits/spandex "0.3.4"]
                  [org.clojure/core.async "0.3.441"]
-                 [clj-time "0.13.0"]]
+                 [clojure.java-time "0.2.2"]]
   :javac-options ["-target" "1.6" "-source" "1.6" "-Xlint:-options"]
   :aot [taxi-rides-clj.core]
   :main taxi-rides-clj.core)

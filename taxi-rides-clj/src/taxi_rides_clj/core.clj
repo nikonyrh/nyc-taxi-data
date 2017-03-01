@@ -5,7 +5,7 @@
             [clojure.java.io :as io]
             [qbits.spandex :as s]
             [clojure.core.async :as async]
-            [clj-time.core :as t])
+            [java-time :as t])
   (:use clojure.set)
   (:import java.util.zip.GZIPInputStream)
   (:gen-class))
@@ -26,7 +26,9 @@
 
 ; http://yellerapp.com/posts/2014-12-11-14-race-condition-in-clojure-println.html
 (defn my-println [& more]
-  (.write *out* (str (clojure.string/join " " more) "\n")))
+  (do
+    (.write *out* (str (clojure.string/join "" more) "\n"))
+    (flush)))
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (def data-folder "/home/wrecked/projects/taxi-rides/data")
@@ -35,20 +37,27 @@
 (defmacro make-parser [f]
   `(fn [v#] (if-not (empty? v#)
               (try (~f v#)
-                   (catch Exception e# (my-println (str "Invalid value '" v# "' for parser " (quote ~f))))))))
+                   (catch Exception e#
+                     (do (my-println "Invalid value '" v# "' for parser " (quote ~f))
+                         (my-println "Exception: " e#)))))))
 
-(let [double-parser   (make-parser Double.)
-      date-format     (java.text.SimpleDateFormat. "yyyy-MM-dd hh:mm:ss")
-      ymd-format      (java.text.SimpleDateFormat. "yyyyMMdd")
-      hms-format      (java.text.SimpleDateFormat. "hhmmss")
-      basic-parser   #(let [d (.parse date-format %)] (str (.format ymd-format d) "T" (.format hms-format d) "Z"))]
+(let [int-parser      (make-parser Integer.)
+      double-parser   (make-parser Double.)
+      digits          (into #{\T} (for [i (range 10)] (first (str i))))
+      assert-len     #(if (= (count %2) %) %2 (throw (Exception. (str "Expected length " % ", got '" %2 "'!"))))
+      basic-parser   #(let [d (->> % (re-seq #"[0-9]+") (map int-parser) (apply t/local-date-time)
+                                     str (filter digits) (apply str))
+                            d (if (and (= (count d) 13) (= (nth d 8) \T))
+                                (str d "00")
+                                d)]
+                        (str (assert-len 15 d) "Z"))]
   (def parsers
-    {:int              (make-parser Integer.)
+    {:int              int-parser
      :float            double-parser
      :latlon          #(if-not (= % "0") (double-parser %))
      :keyword         #(let [s (string/trim %)] (if-not (empty? s) s))
      :basic-datetime   (make-parser basic-parser)}))
-((:basic-datetime parsers) "2013-11-01 00:06:39")
+;((:basic-datetime parsers) "2013-08-08 11:50:09")
 
 (let [[header & rows] (-> (str data-folder "/central_park_weather.csv") slurp csv/read-csv)
       cols-to-keep #{"DATE" "PRCP" "SNWD" "SNOW" "TMAX" "TMIN" "AWND"}
@@ -163,25 +172,36 @@
         (future (loop [] (async/<!! output-ch))))))
 
 (defn insert-file [file]
-  (let [p      (my-println (str "Started file " file "\n"))
+  (let [prn    (partial my-println (t/local-time) ":" file " ")
         docs   (vec (parse-trips file))
         client (s/client {:hosts [(str "http://" (:server es-config))]})
         doc->bulk (fn [doc] [{:index {:_index (:index doc) :_type :ride :_id (:id doc)}}
                              (reduce dissoc doc [:index :id])])
         exists? (fn [doc] (= 200 (:status (s/request client {:url (str (:index doc) "/ride/" (:id doc)) :method :head}))))]
-    (if (and (exists? (first docs)) (exists? (last docs)))
-      (my-println (str "Skipped " file "!\n"))
-      (->>
-        (for [chunk (partition-all 500 docs)]
-          (let [chunk-body (->> chunk (map doc->bulk) flatten s/chunks->body)
-                response   (s/request client {:url "_bulk" :method :put :headers {"content-type" "text/plain"} :body chunk-body})]
-            (->> response :body :items (map (comp :status :index)))))
-        flatten
-        frequencies))))
+    (if (and (exists? (first docs)) (exists? (->> docs count dec (nth docs))))
+      (prn "skipped!")
+      (let [p     (prn "storing " (count docs) " docs")
+            freqs (->> (for [chunk (partition-all 500 docs)]
+                         (let [chunk-body (->> chunk (map doc->bulk) flatten s/chunks->body)
+                               response   (s/request client {:url "_bulk" :method :put :headers {"content-type" "text/plain"} :body chunk-body})]
+                           (->> response :body :items (map (comp :status :index)))))
+                       flatten
+                       frequencies)
+            p      (prn "got " freqs)]
+        freqs))))
 
+(defn store-green [n]
+  (let [p      (my-println "Started at " (t/local-time))
+        result (doall (->> #"green_.+\.csv\.gz$" find-files (my-pmap n insert-file)))
+        p      (my-println "Finished at " (t/local-time))]
+    result))
+;(def results (store-green 6)
+
+;(->> #"green_.+\.csv\.gz$" find-files first parse-trips (take 3) pprint)
+;(->> #"green_.+\.csv\.gz$" find-files (take 1) (map insert-file))
 ;(->> #"green_.+\.csv\.gz$" find-files (my-pmap 1 insert-file))
-;(time (->> #"green_.+\.csv\.gz$" find-files (my-pmap 4 insert-file)))
-;(-> #"green_.+\.csv\.gz$" find-files count)
+;(->> #"green_.+\.csv\.gz$" find-files (my-pmap 7 insert-file)))
+;(->> #"green_.+\.csv\.gz$" find-files count)
 
 
 (defn -main []

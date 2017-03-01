@@ -1,4 +1,5 @@
 #!/bin/bash
+cd "$(dirname "$(realpath "$0")")";
 set -e
 
 if [ "$1" = "" ]; then
