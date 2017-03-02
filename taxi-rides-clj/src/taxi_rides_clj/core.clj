@@ -14,21 +14,21 @@
 (defn get-hash [type data] (.digest (java.security.MessageDigest/getInstance type) (.getBytes data)))
 (defn sha1-hash [data] (->> data (get-hash "sha1") (map #(.substring (Integer/toString (+ (bit-and % 0xff) 0x100) 16) 1)) (apply str)))
 
+; http://yellerapp.com/posts/2014-12-11-14-race-condition-in-clojure-println.html
+(defn my-println [& more]
+  (do
+    (.write *out* (str (clojure.string/join "" more) "\n"))
+    (flush)))
+
 ; Based on standard pmap but with configurable n
 (defn my-pmap [n f coll]
-  (let [rets (map #(future (f %)) coll)
+  (let [rets (map #(-> % f (try (catch Exception e (my-println "Exception: " e))) future) coll)
         step (fn step [[x & xs :as vs] fs]
                (lazy-seq
                  (if-let [s (seq fs)]
                    (cons (deref x) (step xs (rest s)))
                    (map deref vs))))]
      (step rets (drop n rets))))
-
-; http://yellerapp.com/posts/2014-12-11-14-race-condition-in-clojure-println.html
-(defn my-println [& more]
-  (do
-    (.write *out* (str (clojure.string/join "" more) "\n"))
-    (flush)))
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (def data-folder "/home/wrecked/projects/taxi-rides/data")
@@ -57,7 +57,6 @@
      :latlon          #(if-not (= % "0") (double-parser %))
      :keyword         #(let [s (string/trim %)] (if-not (empty? s) s))
      :basic-datetime   (make-parser basic-parser)}))
-;((:basic-datetime parsers) "2013-08-08 11:50:09")
 
 (let [[header & rows] (-> (str data-folder "/central_park_weather.csv") slurp csv/read-csv)
       cols-to-keep #{"DATE" "PRCP" "SNWD" "SNOW" "TMAX" "TMIN" "AWND"}
@@ -79,7 +78,7 @@
 (def col-mapping
   {"VendorID"                [:int             :vendor-id]
    "lpep_pickup_datetime"    [:basic-datetime  :pickup-dt]
-   "Lpep_dropoff_datetime"   [:basic-datetime  :dropff-dt]
+   "Lpep_dropoff_datetime"   [:basic-datetime  :dropoff-dt]
    "Store_and_fwd_flag"      [:keyword         :store-flag]
    "RateCodeID"              [:int             :rate-code-id]
    "Pickup_longitude"        [:latlon          :pickup-lon      :skip-in-es]
@@ -87,7 +86,7 @@
    "Dropoff_longitude"       [:latlon          :dropoff-lon     :skip-in-es]
    "Dropoff_latitude"        [:latlon          :dropoff-lat     :skip-in-es]
    "Passenger_count"         [:int             :n-passengers]
-   "Trip_distance"           [:float           :distance]
+   "Trip_distance"           [:float           :travel-km]
    "Fare_amount"             [:float           :paid-fare]
    "MTA_tax"                 [:float           :paid-tax]
    "Tip_amount"              [:float           :paid-tip]
@@ -100,7 +99,13 @@
    
    ; These are formed by mergin latitude an longitude columns, not part of CSV
    :pickup-pos   [:geopoint :pickup-pos]
-   :dropoff-pos  [:geopoint :dropoff-pos]})
+   :dropoff-pos  [:geopoint :dropoff-pos]
+   :dlat-km      [:float    :dlat-km]
+   :dlon-km      [:float    :dlon-km]
+   :pickup-time  [:float    :pickup-time]
+   :dropoff-time [:float    :dropoff-time]
+   :travel-h     [:float    :travel-h]
+   :speed-kmph   [:float    :speed-kmph]})
 
 (def fields
   (->> (concat
@@ -110,34 +115,59 @@
 
 (defn parse-trips [file]
   (with-open [in (-> file clojure.java.io/input-stream java.util.zip.GZIPInputStream.)]
-    (let [doc-id-fields [:pickup-dt :dropff-dt :pickup-lat :pickup-lon :dropoff-lat :dropoff-lon :distance :paid-total]
+    (let [doc-id-fields [:pickup-dt :dropoff-dt :pickup-lat :pickup-lon :dropoff-lat :dropoff-lon :travel-km :paid-total]
           dataset (->> file str (re-find #"([a-z]+)[^/]+$") second)
           [header & rows] (-> in slurp csv/read-csv)
           header   (map string/trim header)
-          missing  (clojure.set/difference (-> header set) (-> col-mapping keys set))
-          check    (assert (empty? missing) (str "Missing cols for " missing))
+          missing  (clojure.set/difference (->> col-mapping keys (filter string?) set) (-> header set))
+          check    (if-not (empty? missing) (throw (Exception. (str "Missing cols for " missing " at " file))))
+          drop-fields identity ; #(reduce dissoc % [:pickup-lat :pickup-lon :dropoff-lat :dropoff-lon])
           header   (map col-mapping header)
           n-cols   (count header)
+          round    (fn [n] (let [scale 1000.0] (-> n (* scale) Math/round (/ scale))))
+          to-int-str (fn [v] (if v (let [v (int v)] (str (if (< v 10) "0" "") v))))
+          deg2km   (/ 40075.0 360.0)
+          mile2km  (fn [mile] (-> mile (* 1.60934) round))
+          delta-km (fn [from to] (if (and from to) (-> (- to from) (* deg2km) round)))
+          dist     (fn [a b] (if (and a b) (Math/sqrt (+ (* a a) (* b b))) 0.0))
+          to-time  (fn [datetime]
+                     (let [time (apply + (map / (map #(->> % (apply str) ((:int parsers))) (->> datetime (drop 9) (partition 2))) [1.0 60.0 3600.0]))]
+                       (if (not= time 0.0) (round time))))
           docs     (for [row rows :when (>= (count row) n-cols)]
                      (let [doc (into (sorted-map) (map (fn [h v] (if h [(second h) ((-> h first parsers) v)])) header row))]
                        (-> doc
                          (assoc :id      (->> doc-id-fields (map doc) (interleave (repeat "/")) (apply str) sha1-hash))
                          (assoc :index   (apply str "taxicab-" dataset "-" (take 4 (:pickup-dt doc))))
                          (into           (weather (-> doc :pickup-dt (subs 0 8)))))))]
-        (for [doc docs :when (pos? (:distance doc))]
+        (for [doc docs :when (pos? (:travel-km doc))]
           (-> doc
-              (assoc :pickup-pos  (if (:pickup-lon  doc) (mapv doc [:pickup-lon  :pickup-lat])))
-              (assoc :dropoff-pos (if (:dropoff-lon doc) (mapv doc [:dropoff-lon :dropoff-lat])))
-              (#(reduce dissoc % [:pickup-lat :pickup-lon :dropoff-lat :dropoff-lon])))))))
+              (update :travel-km   mile2km)
+              (assoc :pickup-pos   (if (:pickup-lon  doc) (mapv doc [:pickup-lon  :pickup-lat])))
+              (assoc :dropoff-pos  (if (:dropoff-lon doc) (mapv doc [:dropoff-lon :dropoff-lat])))
+              (assoc :dlat-km      (delta-km (:pickup-lat doc) (:dropoff-lat doc)))
+              (assoc :dlon-km      (delta-km (:pickup-lon doc) (:dropoff-lon doc)))
+              (assoc :pickup-time  (to-time (:pickup-dt  doc)))
+              (assoc :dropoff-time (to-time (:dropoff-dt doc)))
+              (#(assoc % :travel-h   (let [pickup-time  (:pickup-time  %)
+                                           dropoff-time (:dropoff-time %)]
+                                       (if (and dropoff-time pickup-time (not= dropoff-time pickup-time))
+                                         (round (let[delta (- dropoff-time pickup-time)]
+                                                  (if (pos? delta) delta (+ delta 24))))))))
+             ;(update :pickup-time  to-int-str)
+             ;(update :dropoff-time to-int-str)
+              (#(assoc % :speed-kmph (if-let [travel-h (:travel-h %)] (round (/ (:travel-km %) travel-h)))))
+              (#(if (< (dist (:dlat-km %) (:dlon-km %)) 0.2) (reduce dissoc % [:dlat-km :dlon-km]) %))
+              drop-fields)))))
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (def es-types
     {:float            {:type "float"}
+     :latlon           {:type "float"}
      :double           {:type "double"}
      :int              {:type "integer"}
      :keyword          {:type "keyword"}
      :basic-date       {:type "date" :format "basic_date"}
-     :basic-datetime   {:type "date" :format "basic_date_time_no_millis"}
+     :basic-datetime   {:type "date" :format "basic_date_time_no_millis||year_month_day||epoch_millis"}
      :geopoint         {:type "geo_point"}})
 
 (def taxi-mapping
@@ -149,6 +179,8 @@
   {:server      (or (System/getenv "ES_SERVER")      "192.168.0.100:9200")})
 
 ; curl -s 'http://localhost:9200/_template/*?pretty'
+; curl -XDELETE 'http://localhost:9200/_template/taxicab'
+; curl -XDELETE 'http://localhost:9200/taxicab-green-*'
 (defn create-template [client template-name body]
   (let [url (str "_template/" template-name)]
     (if (= 404 (:status (s/request client {:url url :method :head})))
@@ -160,43 +192,37 @@
 ;(create-taxicab-template)
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-; Got issue with channel having more than 1024 items at once, don't know how to fix :(
-(comment
-  (defn insert-file [file]
-    (let [docs (parse-trips file)
-          client (s/client {:hosts [(str "http://" (:server es-config))]})
-          bulk-cfg {:flush-threshold 100 :flush-interval 1000 :max-concurrent-requests 6}
-          {:keys [input-ch output-ch]} (s/bulk-chan client bulk-cfg)]
-        (doall (for [doc docs] (async/put! input-ch [{:index {:_index (:index doc) :_type :ride :_id (:id doc)}}
-                                                     (reduce dissoc doc [:index :id])])))
-        (future (loop [] (async/<!! output-ch))))))
+(defmacro my-println-t [& forms]
+  `(my-println (t/local-time) ":" ~'file " " ~@forms))
 
 (defn insert-file [file]
-  (let [prn    (partial my-println (t/local-time) ":" file " ")
-        docs   (vec (parse-trips file))
+  (let [docs   (parse-trips file)
         client (s/client {:hosts [(str "http://" (:server es-config))]})
         doc->bulk (fn [doc] [{:index {:_index (:index doc) :_type :ride :_id (:id doc)}}
                              (reduce dissoc doc [:index :id])])
         exists? (fn [doc] (= 200 (:status (s/request client {:url (str (:index doc) "/ride/" (:id doc)) :method :head}))))]
-    (if (and (exists? (first docs)) (exists? (->> docs count dec (nth docs))))
-      (prn "skipped!")
-      (let [p     (prn "storing " (count docs) " docs")
-            freqs (->> (for [chunk (partition-all 500 docs)]
+    (let [p     (my-println-t "started")
+          freqs (->> (for [chunk (map vec (partition-all 500 docs))]
+                       (if (every? exists? [(first chunk) (->> chunk count dec (nth chunk))])
+                         (repeat (count chunk) 200)
                          (let [chunk-body (->> chunk (map doc->bulk) flatten s/chunks->body)
                                response   (s/request client {:url "_bulk" :method :put :headers {"content-type" "text/plain"} :body chunk-body})]
-                           (->> response :body :items (map (comp :status :index)))))
-                       flatten
-                       frequencies)
-            p      (prn "got " freqs)]
-        freqs))))
+                           (->> response :body :items (map (comp :status :index))))))
+                     flatten
+                     frequencies)
+          p     (my-println-t "got " freqs)]
+      freqs)))
 
 (defn store-green [n]
-  (let [p      (my-println "Started at " (t/local-time))
-        result (doall (->> #"green_.+\.csv\.gz$" find-files (my-pmap n insert-file)))
-        p      (my-println "Finished at " (t/local-time))]
+  (let [p      (my-println (t/local-time) " Started...")
+        result (doall (->> #"green_tripdata_201.+\.csv\.gz$" find-files (my-pmap n insert-file)))
+        p      (my-println (t/local-time) " ...finished!")]
     result))
-;(def results (store-green 6)
+;(def results (store-green 6))
 
+;(->> #"green_.+\.csv\.gz$" find-files (map insert-file))
+
+;(->> #"green_tripdata_201[^34].+\.csv\.gz$" find-files (map str))
 ;(->> #"green_.+\.csv\.gz$" find-files first parse-trips (take 3) pprint)
 ;(->> #"green_.+\.csv\.gz$" find-files (take 1) (map insert-file))
 ;(->> #"green_.+\.csv\.gz$" find-files (my-pmap 1 insert-file))
@@ -204,5 +230,7 @@
 ;(->> #"green_.+\.csv\.gz$" find-files count)
 
 
-(defn -main []
-  (println "Hello, World!"))
+(defn -main [arg]
+  (do
+    (store-green ((:int parsers) arg))
+    (shutdown-agents)))
