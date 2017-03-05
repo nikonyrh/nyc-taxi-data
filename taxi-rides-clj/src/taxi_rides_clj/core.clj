@@ -81,10 +81,10 @@
    "Lpep_dropoff_datetime"   [:basic-datetime  :dropoff-dt]
    "Store_and_fwd_flag"      [:keyword         :store-flag]
    "RateCodeID"              [:int             :rate-code-id]
-   "Pickup_longitude"        [:latlon          :pickup-lon      :skip-in-es]
-   "Pickup_latitude"         [:latlon          :pickup-lat      :skip-in-es]
-   "Dropoff_longitude"       [:latlon          :dropoff-lon     :skip-in-es]
-   "Dropoff_latitude"        [:latlon          :dropoff-lat     :skip-in-es]
+   "Pickup_longitude"        [:latlon          :pickup-lon]
+   "Pickup_latitude"         [:latlon          :pickup-lat]
+   "Dropoff_longitude"       [:latlon          :dropoff-lon]
+   "Dropoff_latitude"        [:latlon          :dropoff-lat]
    "Passenger_count"         [:int             :n-passengers]
    "Trip_distance"           [:float           :travel-km]
    "Fare_amount"             [:float           :paid-fare]
@@ -97,7 +97,8 @@
    "Trip_type"               [:keyword         :trip-type]
    "Extra"                   nil
    
-   ; These are formed by mergin latitude an longitude columns, not part of CSV
+   ; These are generated, not part of CSV
+   :company      [:keyword  :company]
    :pickup-pos   [:geopoint :pickup-pos]
    :dropoff-pos  [:geopoint :dropoff-pos]
    :dlat-km      [:float    :dlat-km]
@@ -132,7 +133,7 @@
           dist     (fn [a b] (if (and a b) (Math/sqrt (+ (* a a) (* b b))) 0.0))
           to-time  (fn [datetime]
                      (let [time (apply + (map / (map #(->> % (apply str) ((:int parsers))) (->> datetime (drop 9) (partition 2))) [1.0 60.0 3600.0]))]
-                       (if (not= time 0.0) (round time))))
+                       (if (not= time 0.0) (min (round time) 23.999))))
           docs     (for [row rows :when (>= (count row) n-cols)]
                      (let [doc (into (sorted-map) (map (fn [h v] (if h [(second h) ((-> h first parsers) v)])) header row))]
                        (-> doc
@@ -141,13 +142,15 @@
                          (into           (weather (-> doc :pickup-dt (subs 0 8)))))))]
         (for [doc docs :when (pos? (:travel-km doc))]
           (-> doc
-              (update :travel-km   mile2km)
-              (assoc :pickup-pos   (if (:pickup-lon  doc) (mapv doc [:pickup-lon  :pickup-lat])))
-              (assoc :dropoff-pos  (if (:dropoff-lon doc) (mapv doc [:dropoff-lon :dropoff-lat])))
-              (assoc :dlat-km      (delta-km (:pickup-lat doc) (:dropoff-lat doc)))
-              (assoc :dlon-km      (delta-km (:pickup-lon doc) (:dropoff-lon doc)))
-              (assoc :pickup-time  (to-time (:pickup-dt  doc)))
-              (assoc :dropoff-time (to-time (:dropoff-dt doc)))
+              (assoc  :company       "Green")
+              (update :travel-km     mile2km)
+              (assoc  :pickup-pos    (if (:pickup-lon  doc) (mapv doc [:pickup-lon  :pickup-lat])))
+              (assoc  :dropoff-pos   (if (:dropoff-lon doc) (mapv doc [:dropoff-lon :dropoff-lat])))
+              (assoc  :dlat-km       (delta-km (:pickup-lat doc) (:dropoff-lat doc)))
+              (assoc  :dlon-km       (delta-km (:pickup-lon doc) (:dropoff-lon doc)))
+              (assoc  :pickup-time   (to-time (:pickup-dt  doc)))
+              (assoc  :dropoff-time  (to-time (:dropoff-dt doc)))
+              (update :paid-ehail   #(or % 0.0))
               (#(assoc % :travel-h   (let [pickup-time  (:pickup-time  %)
                                            dropoff-time (:dropoff-time %)]
                                        (if (and dropoff-time pickup-time (not= dropoff-time pickup-time))
@@ -155,7 +158,7 @@
                                                   (if (pos? delta) delta (+ delta 24))))))))
              ;(update :pickup-time  to-int-str)
              ;(update :dropoff-time to-int-str)
-              (#(assoc % :speed-kmph (if-let [travel-h (:travel-h %)] (round (/ (:travel-km %) travel-h)))))
+              (#(assoc % :speed-kmph (if-let [travel-h (:travel-h %)] (if (> travel-h 0.17) (round (/ (:travel-km %) travel-h))))))
               (#(if (< (dist (:dlat-km %) (:dlon-km %)) 0.2) (reduce dissoc % [:dlat-km :dlon-km]) %))
               drop-fields)))))
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
