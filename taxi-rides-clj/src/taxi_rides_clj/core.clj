@@ -75,12 +75,13 @@
          (into {}))))
 ;(->> weather seq (take 10))
 
-(def col-mapping
-  {"VendorID"                [:int             :vendor-id]
+(def col-mapping-raw
+  {; Started from Green Taxi dataset
+   "VendorID"                [:int             :vendor-id]
    "lpep_pickup_datetime"    [:basic-datetime  :pickup-dt]
    "Lpep_dropoff_datetime"   [:basic-datetime  :dropoff-dt]
    "Store_and_fwd_flag"      [:keyword         :store-flag]
-   "RateCodeID"              [:int             :rate-code-id]
+   "RateCodeID"              [:keyword         :rate-code]
    "Pickup_longitude"        [:latlon          :pickup-lon]
    "Pickup_latitude"         [:latlon          :pickup-lat]
    "Dropoff_longitude"       [:latlon          :dropoff-lon]
@@ -96,8 +97,25 @@
    "Payment_type"            [:keyword         :payment-type]
    "Trip_type"               [:keyword         :trip-type]
    "Extra"                   nil
+   "improvement_surcharge"   nil
    
-   ; These are generated, not part of CSV
+   ; These are from Yellow Taxi dataset
+   "vendor_name"             [:keyword         :vendor-name]
+   "trip_pickup_datetime"    [:basic-datetime  :pickup-dt]
+   "trip_dropoff_datetime"   [:basic-datetime  :dropoff-dt]
+   "tip_amt"                 [:float           :paid-tip]
+   "fare_amt"                [:float           :paid-fare]
+   "tolls_amt"               [:float           :paid-tolls]
+   "total_amt"               [:float           :paid-total]
+   "rate_code"               [:keyword         :rate-code]
+   "start_lon"               [:latlon          :pickup-lon]
+   "start_lat"               [:latlon          :pickup-lat]
+   "end_lon"                 [:latlon          :dropoff-lon]
+   "end_lat"                 [:latlon          :dropoff-lat]
+   "store_and_forward"       [:keyword         :store-flag]
+   "surcharge"               nil
+   
+   ; These are generated fields, not part of CSV. But also listed here to simplify ES mapping generation.
    :company      [:keyword  :company]
    :pickup-pos   [:geopoint :pickup-pos]
    :dropoff-pos  [:geopoint :dropoff-pos]
@@ -108,6 +126,9 @@
    :travel-h     [:float    :travel-h]
    :speed-kmph   [:float    :speed-kmph]})
 
+; Mapping CSV columns to lowercase to simplify schema definition
+(def col-mapping (into {} (for [[k v] col-mapping-raw] [(if (string? k) (string/lower-case k) k) v])))
+
 (def fields
   (->> (concat
          (for [weather-field (-> weather vals first keys)] [weather-field :float])
@@ -117,22 +138,32 @@
 (defn parse-trips [file]
   (with-open [in (-> file clojure.java.io/input-stream java.util.zip.GZIPInputStream.)]
     (let [doc-id-fields [:pickup-dt :dropoff-dt :pickup-lat :pickup-lon :dropoff-lat :dropoff-lon :travel-km :paid-total]
-          dataset (->> file str (re-find #"([a-z]+)[^/]+$") second)
-          [header & rows] (-> in slurp csv/read-csv)
-          header   (map string/trim header)
-          missing  (clojure.set/difference (->> col-mapping keys (filter string?) set) (-> header set))
-          check    (if-not (empty? missing) (throw (Exception. (str "Missing cols for " missing " at " file))))
-          drop-fields identity ; #(reduce dissoc % [:pickup-lat :pickup-lon :dropoff-lat :dropoff-lon])
-          header   (map col-mapping header)
-          n-cols   (count header)
-          round    (fn [n] (let [scale 1000.0] (-> n (* scale) Math/round (/ scale))))
-          to-int-str (fn [v] (if v (let [v (int v)] (str (if (< v 10) "0" "") v))))
-          deg2km   (/ 40075.0 360.0)
-          mile2km  (fn [mile] (-> mile (* 1.60934) round))
-          delta-km (fn [from to] (if (and from to) (-> (- to from) (* deg2km) round)))
-          dist     (fn [a b] (if (and a b) (Math/sqrt (+ (* a a) (* b b))) 0.0))
+          company           (first (filter #(.contains (str file) %) ["green" "yellow" "uber"]))
+          vendor-lookup     (if (= company "green") {1 "Creative Mobile Technologies" 2 "VeriFone"})
+          dataset           (->> file str (re-find #"([a-z]+)[^/]+$") second)
+          [header & rows]   (-> in slurp csv/read-csv)
+          header            (map (comp string/lower-case string/trim) header)
+          missing           (clojure.set/difference (-> header set) (->> col-mapping keys (filter string?) set))
+          check             (if-not (empty? missing) (throw (Exception. (str "Missing cols for " missing " at " file))))
+          drop-extra-fields identity ; #(reduce dissoc % [:pickup-lat :pickup-lon :dropoff-lat :dropoff-lon])
+          header            (map col-mapping header)
+          n-cols            (count header)
+          coalesce-to-zero #(or % 0.0)
+          round            #(let [scale 1000.0] (-> % (* scale) Math/round (/ scale)))
+          deg2km            (/ 40075.0 360.0)
+          mile2km          #(-> % (* 1.60934) round)
+          delta-km          (fn [from to] (if (and from to) (-> (- to from) (* deg2km) round)))
+          dist              (fn [a b]     (if (and a b)     (Math/sqrt (+ (* a a) (* b b))) 0.0))
+          filter-km-deltas #(if (< (dist (:dlat-km %) (:dlon-km %)) 0.2) (reduce dissoc % [:dlat-km :dlon-km]) %)
+          assoc-speed-kmph #(assoc % :speed-kmph (if-let [travel-h (:travel-h %)] (if (> travel-h 0.17) (round (/ (:travel-km %) travel-h)))))
+          assoc-travel-h   #(assoc % :travel-h   (let [pickup-time  (:pickup-time  %)
+                                                       dropoff-time (:dropoff-time %)]
+                                                   (if (and dropoff-time pickup-time (not= dropoff-time pickup-time))
+                                                     (round (let[delta (- dropoff-time pickup-time)]
+                                                              (if (pos? delta) delta (+ delta 24)))))))
           to-time  (fn [datetime]
-                     (let [time (apply + (map / (map #(->> % (apply str) ((:int parsers))) (->> datetime (drop 9) (partition 2))) [1.0 60.0 3600.0]))]
+                     (let [time-scales [1.0 60.0 3600.0]
+                           time (apply + (map / (map #(->> % (apply str) ((:int parsers))) (->> datetime (drop 9) (partition 2))) time-scales))]
                        (if (not= time 0.0) (min (round time) 23.999))))
           docs     (for [row rows :when (>= (count row) n-cols)]
                      (let [doc (into (sorted-map) (map (fn [h v] (if h [(second h) ((-> h first parsers) v)])) header row))]
@@ -142,7 +173,8 @@
                          (into           (weather (-> doc :pickup-dt (subs 0 8)))))))]
         (for [doc docs :when (pos? (:travel-km doc))]
           (-> doc
-              (assoc  :company       "Green")
+              (assoc  :company       company)
+              (update :vendor-name #(get vendor-lookup (:vendor-id doc) %))
               (update :travel-km     mile2km)
               (assoc  :pickup-pos    (if (:pickup-lon  doc) (mapv doc [:pickup-lon  :pickup-lat])))
               (assoc  :dropoff-pos   (if (:dropoff-lon doc) (mapv doc [:dropoff-lon :dropoff-lat])))
@@ -150,17 +182,16 @@
               (assoc  :dlon-km       (delta-km (:pickup-lon doc) (:dropoff-lon doc)))
               (assoc  :pickup-time   (to-time (:pickup-dt  doc)))
               (assoc  :dropoff-time  (to-time (:dropoff-dt doc)))
-              (update :paid-ehail   #(or % 0.0))
-              (#(assoc % :travel-h   (let [pickup-time  (:pickup-time  %)
-                                           dropoff-time (:dropoff-time %)]
-                                       (if (and dropoff-time pickup-time (not= dropoff-time pickup-time))
-                                         (round (let[delta (- dropoff-time pickup-time)]
-                                                  (if (pos? delta) delta (+ delta 24))))))))
-             ;(update :pickup-time  to-int-str)
-             ;(update :dropoff-time to-int-str)
-              (#(assoc % :speed-kmph (if-let [travel-h (:travel-h %)] (if (> travel-h 0.17) (round (/ (:travel-km %) travel-h))))))
-              (#(if (< (dist (:dlat-km %) (:dlon-km %)) 0.2) (reduce dissoc % [:dlat-km :dlon-km]) %))
-              drop-fields)))))
+              (update :paid-ehail    coalesce-to-zero)
+              (update :paid-tax      coalesce-to-zero)
+              assoc-travel-h
+              assoc-speed-kmph
+              filter-km-deltas
+              drop-extra-fields)))))
+
+;(time (->> #"green_.+\.csv\.gz$" find-files second parse-trips count))
+;(->> #"green_.+\.csv\.gz$" find-files first parse-trips (take 3) pprint)
+;(->> #"yellow_tripdata_2009-07\.csv\.gz$" find-files first parse-trips (take 3) pprint)
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (def es-types
@@ -182,8 +213,7 @@
   {:server      (or (System/getenv "ES_SERVER")      "192.168.0.100:9200")})
 
 ; curl -s 'http://localhost:9200/_template/*?pretty'
-; curl -XDELETE 'http://localhost:9200/_template/taxicab'
-; curl -XDELETE 'http://localhost:9200/taxicab-green-*'
+; curl -XDELETE 'http://localhost:9200/_template/taxicab' && curl -XDELETE 'http://localhost:9200/taxicab-green-*'
 (defn create-template [client template-name body]
   (let [url (str "_template/" template-name)]
     (if (= 404 (:status (s/request client {:url url :method :head})))
@@ -216,24 +246,24 @@
           p     (my-println-t "got " freqs)]
       freqs)))
 
-(defn store-green [n]
+(defn insert-files [dataset n-parallel]
   (let [p      (my-println (t/local-time) " Started...")
-        result (doall (->> #"green_tripdata_201.+\.csv\.gz$" find-files (my-pmap n insert-file)))
+        result (doall (->> (str dataset ".+\\.csv\\.gz$") re-pattern find-files (my-pmap n-parallel insert-file)))
         p      (my-println (t/local-time) " ...finished!")]
     result))
+
 ;(def results (store-green 6))
 
 ;(->> #"green_.+\.csv\.gz$" find-files (map insert-file))
 
-;(->> #"green_tripdata_201[^34].+\.csv\.gz$" find-files (map str))
-;(->> #"green_.+\.csv\.gz$" find-files first parse-trips (take 3) pprint)
+;(->> #"yellow_tripdata_2009-07\.csv\.gz$" find-files first parse-trips (take 3) pprint)
 ;(->> #"green_.+\.csv\.gz$" find-files (take 1) (map insert-file))
 ;(->> #"green_.+\.csv\.gz$" find-files (my-pmap 1 insert-file))
 ;(->> #"green_.+\.csv\.gz$" find-files (my-pmap 7 insert-file)))
 ;(->> #"green_.+\.csv\.gz$" find-files count)
 
 
-(defn -main [arg]
+(defn -main [dataset n-parallel]
   (do
-    (store-green ((:int parsers) arg))
+    (insert-files dataset ((:int parsers) n-parallel))
     (shutdown-agents)))
