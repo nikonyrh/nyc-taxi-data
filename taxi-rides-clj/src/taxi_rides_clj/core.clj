@@ -101,8 +101,17 @@
    
    ; These are from Yellow Taxi dataset
    "vendor_name"             [:keyword         :vendor-name]
+   "vendor_id"               [:keyword         :vendor-name]
+   
    "trip_pickup_datetime"    [:basic-datetime  :pickup-dt]
    "trip_dropoff_datetime"   [:basic-datetime  :dropoff-dt]
+   
+   "pickup_datetime"         [:basic-datetime  :pickup-dt]
+   "dropoff_datetime"        [:basic-datetime  :dropoff-dt]
+   
+   "tpep_pickup_datetime"    [:basic-datetime  :pickup-dt]
+   "tpep_dropoff_datetime"   [:basic-datetime  :dropoff-dt]
+   
    "tip_amt"                 [:float           :paid-tip]
    "fare_amt"                [:float           :paid-fare]
    "tolls_amt"               [:float           :paid-tolls]
@@ -135,63 +144,70 @@
          (for [[field-type field-name & flag] (vals col-mapping) :when (and field-name (not ((set flag) :skip-in-es)))] [field-name field-type]))
       (into {})))
 
-(defn parse-trips [file]
-  (with-open [in (-> file clojure.java.io/input-stream java.util.zip.GZIPInputStream.)]
-    (let [doc-id-fields [:pickup-dt :dropoff-dt :pickup-lat :pickup-lon :dropoff-lat :dropoff-lon :travel-km :paid-total]
-          company           (first (filter #(.contains (str file) %) ["green" "yellow" "uber"]))
-          vendor-lookup     (if (= company "green") {1 "Creative Mobile Technologies" 2 "VeriFone"})
-          dataset           (->> file str (re-find #"([a-z]+)[^/]+$") second)
-          [header & rows]   (-> in slurp csv/read-csv)
-          header            (map (comp string/lower-case string/trim) header)
-          missing           (clojure.set/difference (-> header set) (->> col-mapping keys (filter string?) set))
-          check             (if-not (empty? missing) (throw (Exception. (str "Missing cols for " missing " at " file))))
-          drop-extra-fields identity ; #(reduce dissoc % [:pickup-lat :pickup-lon :dropoff-lat :dropoff-lon])
-          header            (map col-mapping header)
-          n-cols            (count header)
-          coalesce-to-zero #(or % 0.0)
-          round            #(let [scale 1000.0] (-> % (* scale) Math/round (/ scale)))
-          deg2km            (/ 40075.0 360.0)
-          mile2km          #(-> % (* 1.60934) round)
-          delta-km          (fn [from to] (if (and from to) (-> (- to from) (* deg2km) round)))
-          dist              (fn [a b]     (if (and a b)     (Math/sqrt (+ (* a a) (* b b))) 0.0))
-          filter-km-deltas #(if (< (dist (:dlat-km %) (:dlon-km %)) 0.2) (reduce dissoc % [:dlat-km :dlon-km]) %)
-          assoc-speed-kmph #(assoc % :speed-kmph (if-let [travel-h (:travel-h %)] (if (> travel-h 0.17) (round (/ (:travel-km %) travel-h)))))
-          assoc-travel-h   #(assoc % :travel-h   (let [pickup-time  (:pickup-time  %)
-                                                       dropoff-time (:dropoff-time %)]
-                                                   (if (and dropoff-time pickup-time (not= dropoff-time pickup-time))
-                                                     (round (let[delta (- dropoff-time pickup-time)]
-                                                              (if (pos? delta) delta (+ delta 24)))))))
-          to-time  (fn [datetime]
-                     (let [time-scales [1.0 60.0 3600.0]
-                           time (apply + (map / (map #(->> % (apply str) ((:int parsers))) (->> datetime (drop 9) (partition 2))) time-scales))]
-                       (if (not= time 0.0) (min (round time) 23.999))))
-          docs     (for [row rows :when (>= (count row) n-cols)]
-                     (let [doc (into (sorted-map) (map (fn [h v] (if h [(second h) ((-> h first parsers) v)])) header row))]
-                       (-> doc
-                         (assoc :id      (->> doc-id-fields (map doc) (interleave (repeat "/")) (apply str) sha1-hash))
-                         (assoc :index   (apply str "taxicab-" dataset "-" (take 4 (:pickup-dt doc))))
-                         (into           (weather (-> doc :pickup-dt (subs 0 8)))))))]
-        (for [doc docs :when (pos? (:travel-km doc))]
-          (-> doc
-              (assoc  :company       company)
-              (update :vendor-name #(get vendor-lookup (:vendor-id doc) %))
-              (update :travel-km     mile2km)
-              (assoc  :pickup-pos    (if (:pickup-lon  doc) (mapv doc [:pickup-lon  :pickup-lat])))
-              (assoc  :dropoff-pos   (if (:dropoff-lon doc) (mapv doc [:dropoff-lon :dropoff-lat])))
-              (assoc  :dlat-km       (delta-km (:pickup-lat doc) (:dropoff-lat doc)))
-              (assoc  :dlon-km       (delta-km (:pickup-lon doc) (:dropoff-lon doc)))
-              (assoc  :pickup-time   (to-time (:pickup-dt  doc)))
-              (assoc  :dropoff-time  (to-time (:dropoff-dt doc)))
-              (update :paid-ehail    coalesce-to-zero)
-              (update :paid-tax      coalesce-to-zero)
-              assoc-travel-h
-              assoc-speed-kmph
-              filter-km-deltas
-              drop-extra-fields)))))
+(defn parse-trips [file in]
+  (let [doc-id-fields     [:pickup-dt :dropoff-dt :pickup-lat :pickup-lon :dropoff-lat :dropoff-lon :travel-km :paid-total]
+        company           (->> file str (re-find #"([a-z]+)[^/]+$") second)
+        vendor-lookup     (if (= company "green") {1 "Creative Mobile Technologies" 2 "VeriFone"})
+       ;This is simpler but reads the whole CSV into memory at once, which caused OOMs on larger files
+       ;csv-contents      (-> in slurp csv/read-csv)
+        csv-contents      (->> in io/reader line-seq (map (comp first csv/read-csv)))
+        header            (->> csv-contents first (map (comp string/lower-case string/trim)))
+        missing           (clojure.set/difference (-> header set) (->> col-mapping keys (filter string?) set))
+        check             (if-not (empty? missing) (throw (Exception. (str "Missing cols for " missing " at " file))))
+        drop-extra-fields  identity ; #(reduce dissoc % [:pickup-lat :pickup-lon :dropoff-lat :dropoff-lon])
+        header            (map col-mapping header)
+        n-cols            (count header)
+        coalesce-to-zero #(or % 0.0)
+        round            #(let [scale 1000.0] (-> % (* scale) Math/round (/ scale)))
+        deg2km            (/ 40075.0 360.0)
+        mile2km          #(-> % (* 1.60934) round)
+        delta-km          (fn [from to] (if (and from to) (-> (- to from) (* deg2km) round)))
+        dist              (fn [a b]     (if (and a b)     (Math/sqrt (+ (* a a) (* b b))) 0.0))
+        filter-km-deltas #(if (< (dist (:dlat-km %) (:dlon-km %)) 0.2) (reduce dissoc % [:dlat-km :dlon-km]) %)
+        assoc-speed-kmph #(assoc % :speed-kmph (if-let [travel-h (:travel-h %)] (if (> travel-h 0.17) (round (/ (:travel-km %) travel-h)))))
+        assoc-travel-h   #(assoc % :travel-h   (let [pickup-time  (:pickup-time  %)
+                                                     dropoff-time (:dropoff-time %)]
+                                                 (if (and dropoff-time pickup-time (not= dropoff-time pickup-time))
+                                                   (round (let[delta (- dropoff-time pickup-time)]
+                                                            (if (pos? delta) delta (+ delta 24)))))))
+        to-time  (fn [datetime]
+                   (let [time-scales [1.0 60.0 3600.0]
+                         time (apply + (map / (map #(->> % (apply str) ((:int parsers))) (->> datetime (drop 9) (partition 2))) time-scales))]
+                     (if (not= time 0.0) (min (round time) 23.999))))
+        docs     (for [row (rest csv-contents) :when (>= (count row) n-cols)]
+                   (let [doc (into (sorted-map) (map (fn [h v] (if h [(second h) ((-> h first parsers) v)])) header row))]
+                     (-> doc
+                       (assoc :id      (->> doc-id-fields (map doc) (interleave (repeat "/")) (apply str) sha1-hash))
+                       (assoc :index   (apply str "taxicab-" company "-" (take 4 (:pickup-dt doc))))
+                       (into           (weather (-> doc :pickup-dt (subs 0 8)))))))]
+      (for [doc docs :when (pos? (:travel-km doc))]
+        (-> doc
+            (assoc  :company        company)
+            (update :vendor-name  #(get vendor-lookup (:vendor-id doc) %))
+            (update :travel-km      mile2km)
+            (assoc  :pickup-pos    (if (:pickup-lon  doc) (mapv doc [:pickup-lon  :pickup-lat])))
+            (assoc  :dropoff-pos   (if (:dropoff-lon doc) (mapv doc [:dropoff-lon :dropoff-lat])))
+            (assoc  :dlat-km       (delta-km (:pickup-lat doc) (:dropoff-lat doc)))
+            (assoc  :dlon-km       (delta-km (:pickup-lon doc) (:dropoff-lon doc)))
+            (assoc  :pickup-time   (to-time (:pickup-dt  doc)))
+            (assoc  :dropoff-time  (to-time (:dropoff-dt doc)))
+            (update :paid-ehail     coalesce-to-zero)
+            (update :paid-tax       coalesce-to-zero)
+            assoc-travel-h
+            assoc-speed-kmph
+            filter-km-deltas
+            drop-extra-fields))))
 
-;(time (->> #"green_.+\.csv\.gz$" find-files second parse-trips count))
-;(->> #"green_.+\.csv\.gz$" find-files first parse-trips (take 3) pprint)
-;(->> #"yellow_tripdata_2009-07\.csv\.gz$" find-files first parse-trips (take 3) pprint)
+(comment
+ (let [file (->> #"yellow_tripdata_201.+\.csv\.gz$" find-files first)]
+    (with-open [in (-> file clojure.java.io/input-stream java.util.zip.GZIPInputStream.)]
+      (->> in io/reader line-seq (take 5)))))
+
+(comment
+ (let [file (->> #"yellow_tripdata_201.+\.csv\.gz$" find-files first)]
+    (with-open [in (-> file clojure.java.io/input-stream java.util.zip.GZIPInputStream.)]
+      (->> (parse-trips file in) (take 3) clojure.pprint/pprint))))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (def es-types
@@ -206,14 +222,16 @@
 
 (def taxi-mapping
   {:mappings {:ride  {:properties (->> (map vector (keys fields) (map es-types (vals fields))) (into {}))}}
-   :settings {:number_of_shards 1 :number_of_replicas 0}})
+   :settings {:number_of_shards 4
+              :number_of_replicas 0
+              :refresh_interval "300s"}})
 ;(pprint taxi-mapping)
 
 (def es-config
   {:server      (or (System/getenv "ES_SERVER")      "192.168.0.100:9200")})
 
 ; curl -s 'http://localhost:9200/_template/*?pretty'
-; curl -XDELETE 'http://localhost:9200/_template/taxicab' && curl -XDELETE 'http://localhost:9200/taxicab-green-*'
+; curl -XDELETE 'http://localhost:9200/_template/taxicab' && curl -XDELETE 'http://localhost:9200/taxicab-*'
 (defn create-template [client template-name body]
   (let [url (str "_template/" template-name)]
     (if (= 404 (:status (s/request client {:url url :method :head})))
@@ -229,24 +247,25 @@
   `(my-println (t/local-time) ":" ~'file " " ~@forms))
 
 (defn insert-file [file]
-  (let [docs   (parse-trips file)
-        client (s/client {:hosts [(str "http://" (:server es-config))]})
-        doc->bulk (fn [doc] [{:index {:_index (:index doc) :_type :ride :_id (:id doc)}}
-                             (reduce dissoc doc [:index :id])])
-        exists? (fn [doc] (= 200 (:status (s/request client {:url (str (:index doc) "/ride/" (:id doc)) :method :head}))))]
-    (let [p     (my-println-t "started")
-          freqs (->> (for [chunk (map vec (partition-all 500 docs))]
-                       (if (every? exists? [(first chunk) (->> chunk count dec (nth chunk))])
-                         (repeat (count chunk) 200)
-                         (let [chunk-body (->> chunk (map doc->bulk) flatten s/chunks->body)
-                               response   (s/request client {:url "_bulk" :method :put :headers {"content-type" "text/plain"} :body chunk-body})]
-                           (->> response :body :items (map (comp :status :index))))))
-                     flatten
-                     frequencies)
-          p     (my-println-t "got " freqs)]
-      freqs)))
+  (with-open [in (-> file clojure.java.io/input-stream java.util.zip.GZIPInputStream.)]
+    (let [docs   (parse-trips file in)
+          client (s/client {:hosts [(str "http://" (:server es-config))]})
+          doc->bulk (fn [doc] [{:index {:_index (:index doc) :_type :ride :_id (:id doc)}}
+                               (reduce dissoc doc [:index :id])])
+          exists? (fn [doc] (= 200 (:status (s/request client {:url (str (:index doc) "/ride/" (:id doc)) :method :head}))))]
+      (let [p     (my-println-t "started")
+            freqs (->> (for [chunk (map vec (partition-all 5000 docs))]
+                         (if (every? exists? [(first chunk) (->> chunk count dec (nth chunk))])
+                           (repeat (count chunk) 200)
+                           (let [chunk-body (->> chunk (map doc->bulk) flatten s/chunks->body)
+                                 response   (s/request client {:url "_bulk" :method :put :headers {"content-type" "text/plain"} :body chunk-body})]
+                             (->> response :body :items (map (comp :status :index))))))
+                       flatten
+                       frequencies)
+            p     (my-println-t "got " freqs)]
+        freqs))))
 
-(defn insert-files [dataset n-parallel]
+(defn insert-files [n-parallel dataset]
   (let [p      (my-println (t/local-time) " Started...")
         result (doall (->> (str dataset ".+\\.csv\\.gz$") re-pattern find-files (my-pmap n-parallel insert-file)))
         p      (my-println (t/local-time) " ...finished!")]
@@ -263,7 +282,8 @@
 ;(->> #"green_.+\.csv\.gz$" find-files count)
 
 
-(defn -main [dataset n-parallel]
+; time java -jar target/taxi-rides-clj-0.0.1-SNAPSHOT-standalone.jar 7 yellow
+(defn -main [n-parallel & datasets]
   (do
-    (insert-files dataset ((:int parsers) n-parallel))
+    (doall (for [dataset datasets] (insert-files ((:int parsers) n-parallel) dataset)))
     (shutdown-agents)))
