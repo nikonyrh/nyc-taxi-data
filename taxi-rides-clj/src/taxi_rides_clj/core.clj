@@ -97,8 +97,6 @@
    "Total_amount"            [:float           :paid-total]
    "Payment_type"            [:keyword         :payment-type]
    "Trip_type"               [:keyword         :trip-type]
-   "Extra"                   nil
-   "improvement_surcharge"   nil
    
    ; These are from Yellow Taxi dataset
    "vendor_name"             [:keyword         :vendor-name]
@@ -123,7 +121,13 @@
    "end_lon"                 [:latlon          :dropoff-lon]
    "end_lat"                 [:latlon          :dropoff-lat]
    "store_and_forward"       [:keyword         :store-flag]
+   
+   ; Ignored columns
    "surcharge"               nil
+   "Extra"                   nil
+   "improvement_surcharge"   nil
+   "PULocationID"            nil
+   "DOLocationID"            nil
    
    ; These are generated fields, not part of CSV. But also listed here to simplify ES mapping generation.
    :company      [:keyword  :company]
@@ -227,6 +231,11 @@
  (let [file (->> "yellow_tripdata_2010-02.csv.gz" (str data-folder) io/file)]
     (with-open [in (-> file clojure.java.io/input-stream java.util.zip.GZIPInputStream.)]
       (->> (parse-trips file in) (take 3) clojure.pprint/pprint))))
+
+(comment
+ (time (let [file (->> "yellow_tripdata_2010-07.csv.gz" (str data-folder) io/file)]
+         (with-open [in (-> file clojure.java.io/input-stream java.util.zip.GZIPInputStream.)]
+           (->> (parse-trips file in) count)))))
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defn extract-to-csv [file]
@@ -299,7 +308,7 @@
                                 response   (s/request client {:url "_bulk" :method :put :headers {"content-type" "text/plain"} :body chunk-body})]
                             (->> response :body :items (map (comp :status :index)))))
           _       (my-println-t "started")
-          freqs   (->> (parse-trips file in) (partition-all 1000) (map vec) (map process-chunk) flatten frequencies)
+          freqs   (->> (parse-trips file in) (partition-all 1000) (map process-chunk) flatten frequencies)
           _       (my-println-t "got " freqs)]
         freqs)))
 

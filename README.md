@@ -37,7 +37,9 @@ Starting Kibana:
 
 # Useful commands
 
-I cannot guarantee these instructions will be up to date, but this is how this project works at the moment
+I cannot guarantee these instructions will be up to date, but this is how this project works at the moment.
+Note that this was written before I cherry-picked the commit which brought 2016 July - December rows to
+raw_data_urls.txt.
 
 ```bash
 $ git clone git@github.com:nikonyrh/nyc-taxi-data.git
