@@ -40,11 +40,24 @@ Starting Kibana:
 I cannot guarantee these instructions will be up to date, but this is how this project works at the moment
 
 ```bash
-git clone git@github.com:nikonyrh/nyc-taxi-data.git
-cd nyc-taxi-data
-./download_raw_data.sh
-cd taxi-rides-clj
-lein uberjar
+$ git clone git@github.com:nikonyrh/nyc-taxi-data.git
+$ cd nyc-taxi-data
+
+# Downloading raw CSVs
+$ ./download_raw_data.sh
+
+# Checking what we've got, apparently 148.5 GB of CSVs (879.2 million rows) compressed to 31 GB
+$ cd data
+$ du -hc * | tail -n1
+31G	total
+
+$ ./wc.sh
+ans =
+     0.87915   148.52923
+
+# Building the JAR
+$ cd ../taxi-rides-clj
+$ lein uberjar
 
 # You need Java 8 or newer to run this project as dates are parsed by java.time
 $ java -version
@@ -52,17 +65,21 @@ java version "1.8.0_121"
 Java(TM) SE Runtime Environment (build 1.8.0_121-b13)
 Java HotSpot(TM) 64-Bit Server VM (build 25.121-b13, mixed mode)
 
-# Do less parallel work if you run OOM or want to use the computer for other work as well.
-N_PARALLEL=`nproc`
+# Do less parallel work if you run out of memory or want to use the computer for other work as well.
+$ N_PARALLEL=`nproc`
+$ JAR=target/taxi-rides-clj-0.0.1-SNAPSHOT-standalone.jar
 
 # Parsing, removing duplicates, merging with weather data and writing to local Elasticsearch.
 # Destination can be overridden by ES_SERVER=10.0.2.100:9201 env variable if needed.
-time ls ../data/*.gz | shuf | xargs java -jar target/taxi-rides-clj-0.0.1-SNAPSHOT-standalone.jar insert $N_PARALLEL
+# I could index on average about 20k docs / minute on Core i7 6700K, resulting in 873.3
+# million docs taking 331.3 GB of storage. _all was disabled but _source was not.
+$ time ls ../data/*.gz | shuf | xargs java -jar $JAR insert $N_PARALLEL
 
 # Parsing, removing duplicates, merging with weather data and writing out to .csv.gz files.
-# On Core i7 6700K this took about X core-hours! There might be room for optimization, but then again
-# it produced Y gigabytes of compressed output and Z gigabytes or Z lines of raw CSV. It should be
-# easy to bulk-insert to other database systems such as Redshift or just MS SQL Server.
-mkdir data_out
-time ls ../data/*.gz | shuf | xargs java -jar target/taxi-rides-clj-0.0.1-SNAPSHOT-standalone.jar extract $N_PARALLEL
+# On Core i7 6700K this took 143 core-hours! There might be room for optimization, but then again
+# it produced 45.4 gigabytes of compressed output and 189.4 gigabytes (873.3 million lines) of raw CSV.
+# It should be easy to bulk-insert to other database systems such as Redshift or just MS SQL Server.
+$ mkdir data_out
+$ time ls ../data/*.gz | shuf | xargs java -jar $JAR extract $N_PARALLEL
 ```
+
