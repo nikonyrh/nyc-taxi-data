@@ -5,13 +5,16 @@
             [clojure.java.io :as io]
             [qbits.spandex :as s]
             [clojure.core.async :as async]
-            [java-time :as t])
+            [java-time :as t]
+            [com.climate.claypoole :as cp])
   (:use clojure.set)
   (:import java.util.zip.GZIPInputStream)
   (:gen-class))
 
+(set! *warn-on-reflection* true)
+
 ; https://gist.github.com/prasincs/827272
-(defn get-hash [type data] (.digest (java.security.MessageDigest/getInstance type) (.getBytes data)))
+(defn get-hash [type data] (.digest (java.security.MessageDigest/getInstance type) (.getBytes ^String data)))
 (defn sha1-hash [data] (->> data (get-hash "sha1") (map #(.substring (Integer/toString (+ (bit-and % 0xff) 0x100) 16) 1)) (apply str)))
 
 ; http://yellerapp.com/posts/2014-12-11-14-race-condition-in-clojure-println.html
@@ -20,23 +23,21 @@
     (.write *out* (str (clojure.string/join "" more) "\n"))
     (flush)))
 
-; Based on standard pmap but with configurable n
-(defn my-pmap [n f coll]
-  (let [rets (map #(-> % f (try (catch Exception e (my-println "Exception: " e))) future) coll)
-        step (fn step [[x & xs :as vs] fs]
-               (lazy-seq
-                 (if-let [s (seq fs)]
-                   (cons (deref x) (step xs (rest s)))
-                   (map deref vs))))]
-     (step rets (drop n rets))))
+(defmacro my-println-t [& forms]
+  `(my-println (t/local-time) ":" ~'file " " ~@forms))
+
+(defn getenv
+  ([key] (getenv key nil))
+  ([key default] (let [value (System/getenv key)] (if (-> value count pos?) value default))))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(def data-folder "/home/wrecked/projects/taxi-rides/data")
-(defn find-files [re] (->> data-folder io/file file-seq (filter #(re-find re (-> % .getName))) sort))
+(def data-folder (str (getenv "TAXI_DATA_FOLDER" "/home/wrecked/projects/taxi-rides/data") "/"))
+(defn find-files [re] (->> data-folder io/file file-seq (filter #(re-find re (.getName ^java.io.File %))) sort))
 
 (defmacro make-parser [f]
   `(fn [v#] (if-not (empty? v#)
-              (try (~f v#)
+              (try (~f ^String v#)
                    (catch Exception e#
                      (do (my-println "Invalid value '" v# "' for parser " (quote ~f))
                          (my-println "Exception: " e#)))))))
@@ -58,7 +59,7 @@
      :keyword         #(let [s (string/trim %)] (if-not (empty? s) s))
      :basic-datetime   (make-parser basic-parser)}))
 
-(let [[header & rows] (-> (str data-folder "/central_park_weather.csv") slurp csv/read-csv)
+(let [[header & rows] (-> (str data-folder "central_park_weather.csv") slurp csv/read-csv)
       cols-to-keep #{"DATE" "PRCP" "SNWD" "SNOW" "TMAX" "TMIN" "AWND"}
       n-cols       (count header)
       avg-wind-fix (fn [row] (update row :weather-AWND #(if-not (neg? %) %)))
@@ -144,16 +145,33 @@
          (for [[field-type field-name & flag] (vals col-mapping) :when (and field-name (not ((set flag) :skip-in-es)))] [field-name field-type]))
       (into {})))
 
+; Used for filtering out duplicate documents, so instead of storing
+; them to ES with an id we'll bear the CPU cost here. Documentation
+; says the function of filter must not have side effects but I guess
+; this is a valid exception.
+(defn my-distinct [id-getter coll]
+  (let [seen-ids (volatile! #{})
+        seen?    (fn [id] (if-not (contains? @seen-ids id) (vswap! seen-ids conj id)))]
+    (filter (comp seen? id-getter) coll)))
+
 (defn parse-trips [file in]
   (let [doc-id-fields     [:pickup-dt :dropoff-dt :pickup-lat :pickup-lon :dropoff-lat :dropoff-lon :travel-km :paid-total]
+        get-doc-id        (fn [doc] (->> doc-id-fields (map doc) (interleave (repeat "/")) (apply str) sha1-hash))
+        
         company           (->> file str (re-find #"([a-z]+)[^/]+$") second)
         vendor-lookup     (if (= company "green") {1 "Creative Mobile Technologies" 2 "VeriFone"})
-       ;This is simpler but reads the whole CSV into memory at once, which caused OOMs on larger files
-       ;csv-contents      (-> in slurp csv/read-csv)
+        
+      ; This is simpler but reads the whole CSV into memory at once, which caused OOMs on larger files
+      ; csv-contents      (-> in slurp csv/read-csv)
+        
+      ; This version feeds lines to read-csv one by one, making the file parsing lazy
         csv-contents      (->> in io/reader line-seq (map (comp first csv/read-csv)))
+        
         header            (->> csv-contents first (map (comp string/lower-case string/trim)))
         missing           (clojure.set/difference (-> header set) (->> col-mapping keys (filter string?) set))
-        check             (if-not (empty? missing) (throw (Exception. (str "Missing cols for " missing " at " file))))
+        _                 (if-not (empty? missing) (throw (Exception. (str "Missing cols for " missing " at " file))))
+        
+      ; I was going to drop these fields but now I think they'd be useful on Kibana heatmap as histogram aggregations
         drop-extra-fields  identity ; #(reduce dissoc % [:pickup-lat :pickup-lon :dropoff-lat :dropoff-lon])
         header            (map col-mapping header)
         n-cols            (count header)
@@ -163,7 +181,10 @@
         mile2km          #(-> % (* 1.60934) round)
         delta-km          (fn [from to] (if (and from to) (-> (- to from) (* deg2km) round)))
         dist              (fn [a b]     (if (and a b)     (Math/sqrt (+ (* a a) (* b b))) 0.0))
+        
+      ; Removing lat and lon deltas from trips with less than 0.2 km travel distance
         filter-km-deltas #(if (< (dist (:dlat-km %) (:dlon-km %)) 0.2) (reduce dissoc % [:dlat-km :dlon-km]) %)
+        
         assoc-speed-kmph #(assoc % :speed-kmph (if-let [travel-h (:travel-h %)] (if (> travel-h 0.17) (round (/ (:travel-km %) travel-h)))))
         assoc-travel-h   #(assoc % :travel-h   (let [pickup-time  (:pickup-time  %)
                                                      dropoff-time (:dropoff-time %)]
@@ -177,10 +198,9 @@
         docs     (for [row (rest csv-contents) :when (>= (count row) n-cols)]
                    (let [doc (into (sorted-map) (map (fn [h v] (if h [(second h) ((-> h first parsers) v)])) header row))]
                      (-> doc
-                       (assoc :id      (->> doc-id-fields (map doc) (interleave (repeat "/")) (apply str) sha1-hash))
                        (assoc :index   (apply str "taxicab-" company "-" (take 4 (:pickup-dt doc))))
                        (into           (weather (-> doc :pickup-dt (subs 0 8)))))))]
-      (for [doc docs :when (pos? (:travel-km doc))]
+      (for [doc (my-distinct get-doc-id docs) :when (pos? (:travel-km doc))]
         (-> doc
             (assoc  :company        company)
             (update :vendor-name  #(get vendor-lookup (:vendor-id doc) %))
@@ -199,15 +219,37 @@
             drop-extra-fields))))
 
 (comment
- (let [file (->> #"yellow_tripdata_201.+\.csv\.gz$" find-files first)]
+ (let [file (->> "yellow_tripdata_2010-02.csv.gz" (str data-folder) io/file)]
     (with-open [in (-> file clojure.java.io/input-stream java.util.zip.GZIPInputStream.)]
       (->> in io/reader line-seq (take 5)))))
 
 (comment
- (let [file (->> #"yellow_tripdata_201.+\.csv\.gz$" find-files first)]
+ (let [file (->> "yellow_tripdata_2010-02.csv.gz" (str data-folder) io/file)]
     (with-open [in (-> file clojure.java.io/input-stream java.util.zip.GZIPInputStream.)]
       (->> (parse-trips file in) (take 3) clojure.pprint/pprint))))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+(defn extract-to-csv [file]
+  (with-open [in (-> file io/file clojure.java.io/input-stream java.util.zip.GZIPInputStream.)]
+    (with-open [out (-> file (string/replace #"/data/" "/data_out/") io/file clojure.java.io/output-stream java.util.zip.GZIPOutputStream. io/writer)]
+      (let [_            (my-println-t "started")
+            cols         (-> fields keys set (disj :pickup-pos :dropoff-pos) sort)
+            docs         (parse-trips file in)
+            dt-format   #(let [[y1 y2 m d h i s] (->> % (remove #{\T \Z}) (partition 2) (map (partial apply str)))] (str y1 y2 \- m \- d \space h \: i \: s))
+            get-cols    #(map (fn [col] (or (col %) "NULL")) cols)
+            n-docs       (atom 0)
+            _            (csv/write-csv out
+                           (concat
+                             [(for [col cols] (-> col str (subs 1)))]
+                             (for [doc docs]
+                               (do (swap! n-docs inc)
+                                   (-> doc
+                                       (update :pickup-dt  dt-format)
+                                       (update :dropoff-dt dt-format)
+                                       get-cols)))))]
+        (my-println-t (str "finished, " @n-docs " rows"))))))
+
+;(extract-to-csv (str data-folder "green_tripdata_2013-08.csv.gz"))
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (def es-types
@@ -221,21 +263,25 @@
      :geopoint         {:type "geo_point"}})
 
 (def taxi-mapping
-  {:mappings {:ride  {:properties (->> (map vector (keys fields) (map es-types (vals fields))) (into {}))}}
-   :settings {:number_of_shards 4
+  {:mappings {:ride  {:_all    {:enabled false}
+                     ;:_source {:enabled false}
+                      :properties (->> (map vector (keys fields) (map es-types (vals fields)))
+                                       (into {}))}}
+   :settings {"index.translog.flush_threshold_size" "1g"
+              "index.store.throttle.max_bytes_per_sec" "1000mb"
+              :number_of_shards 1
               :number_of_replicas 0
-              :refresh_interval "300s"}})
+              :refresh_interval "10s"}})
 ;(pprint taxi-mapping)
 
 (def es-config
-  {:server      (or (System/getenv "ES_SERVER")      "192.168.0.100:9200")})
+  {:server (getenv "ES_SERVER" "192.168.0.100:9200")})
 
 ; curl -s 'http://localhost:9200/_template/*?pretty'
 ; curl -XDELETE 'http://localhost:9200/_template/taxicab' && curl -XDELETE 'http://localhost:9200/taxicab-*'
 (defn create-template [client template-name body]
   (let [url (str "_template/" template-name)]
-    (if (= 404 (:status (s/request client {:url url :method :head})))
-      (s/request client {:url url :method :put :body body}))))
+    (s/request client {:url url :method :put :body body})))
 
 (defn create-taxicab-template []
   (let [client (s/client {:hosts [(str "http://" (:server es-config))]})]
@@ -243,47 +289,29 @@
 ;(create-taxicab-template)
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(defmacro my-println-t [& forms]
-  `(my-println (t/local-time) ":" ~'file " " ~@forms))
-
 (defn insert-file [file]
-  (with-open [in (-> file clojure.java.io/input-stream java.util.zip.GZIPInputStream.)]
-    (let [docs   (parse-trips file in)
-          client (s/client {:hosts [(str "http://" (:server es-config))]})
-          doc->bulk (fn [doc] [{:index {:_index (:index doc) :_type :ride :_id (:id doc)}}
-                               (reduce dissoc doc [:index :id])])
-          exists? (fn [doc] (= 200 (:status (s/request client {:url (str (:index doc) "/ride/" (:id doc)) :method :head}))))]
-      (let [p     (my-println-t "started")
-            freqs (->> (for [chunk (map vec (partition-all 5000 docs))]
-                         (if (every? exists? [(first chunk) (->> chunk count dec (nth chunk))])
-                           (repeat (count chunk) 200)
-                           (let [chunk-body (->> chunk (map doc->bulk) flatten s/chunks->body)
-                                 response   (s/request client {:url "_bulk" :method :put :headers {"content-type" "text/plain"} :body chunk-body})]
-                             (->> response :body :items (map (comp :status :index))))))
-                       flatten
-                       frequencies)
-            p     (my-println-t "got " freqs)]
-        freqs))))
+  (with-open [in (-> file io/file clojure.java.io/input-stream java.util.zip.GZIPInputStream.)]
+    (let [client    (s/client {:hosts [(str "http://" (:server es-config))]})
+          doc->bulk (fn [doc] [{:index {:_index (:index doc) :_type :ride}} (dissoc doc :index)])
+          ; TODO: Try-catch-retry logic for java.io.IOException if ES timeouts under heavy load
+          process-chunk (fn [chunk]
+                          (let [chunk-body (->> chunk (map doc->bulk) flatten s/chunks->body)
+                                response   (s/request client {:url "_bulk" :method :put :headers {"content-type" "text/plain"} :body chunk-body})]
+                            (->> response :body :items (map (comp :status :index)))))
+          _       (my-println-t "started")
+          freqs   (->> (parse-trips file in) (partition-all 1000) (map vec) (map process-chunk) flatten frequencies)
+          _       (my-println-t "got " freqs)]
+        freqs)))
 
-(defn insert-files [n-parallel dataset]
-  (let [p      (my-println (t/local-time) " Started...")
-        result (doall (->> (str dataset ".+\\.csv\\.gz$") re-pattern find-files (my-pmap n-parallel insert-file)))
-        p      (my-println (t/local-time) " ...finished!")]
-    result))
+(def main-funs
+  {"insert"  insert-file
+   "extract" extract-to-csv})
 
-;(def results (store-green 6))
-
-;(->> #"green_.+\.csv\.gz$" find-files (map insert-file))
-
-;(->> #"yellow_tripdata_2009-07\.csv\.gz$" find-files first parse-trips (take 3) pprint)
-;(->> #"green_.+\.csv\.gz$" find-files (take 1) (map insert-file))
-;(->> #"green_.+\.csv\.gz$" find-files (my-pmap 1 insert-file))
-;(->> #"green_.+\.csv\.gz$" find-files (my-pmap 7 insert-file)))
-;(->> #"green_.+\.csv\.gz$" find-files count)
-
-
-; time java -jar target/taxi-rides-clj-0.0.1-SNAPSHOT-standalone.jar 7 yellow
-(defn -main [n-parallel & datasets]
+; time ls ../data/yellow_*.gz | shuf | xargs java -jar target/taxi-rides-clj-0.0.1-SNAPSHOT-standalone.jar insert 4
+; time ls ../data/*.gz |grep -E '(yellow|green)' | shuf | xargs java -jar target/taxi-rides-clj-0.0.1-SNAPSHOT-standalone.jar extract 8
+(defn -main [f-name n-parallel & files]
   (do
-    (doall (for [dataset datasets] (insert-files ((:int parsers) n-parallel) dataset)))
-    (shutdown-agents)))
+    (create-taxicab-template)
+    (doall (cp/upfor (Integer. ^String n-parallel) [file files] (->> (string/replace file #".+/" "") (str data-folder) ((main-funs f-name)))))
+    (shutdown-agents)
+    (System/exit 0)))

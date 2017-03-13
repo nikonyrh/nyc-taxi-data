@@ -3,8 +3,13 @@ cd "$(dirname "$(realpath "$0")")";
 set -e
 
 if [ "$1" = "" ]; then
-	time cat raw_data_urls.txt raw_uber_data_urls.txt | xargs -n1 -P8 ./download_raw_data.sh
+	# You could also use raw_uber_data_urls.txt here
+	# but this Clojure code doesn't support its schema.
+	# FHV's schema is not supported either.
+	time cat raw_data_urls.txt | grep -v fhv_tripdata | \
+		xargs -n1 -P8 ./download_raw_data.sh
 	
+	# Unifying Uber zip files to gzip compression
 	if stat --printf='' data/*.zip 2>/dev/null; then
 		cd data
 		unzip -q -o *.zip

@@ -5,8 +5,14 @@ this project uses Clojure and Elasticsearch.
 
 # Set up (works on my machine...)
 
+Root SSD option:
+`~/projects/docker-scripts/startElasticsearchContainer.sh 5 16 --data /data0/es5`
+
+Mirrored SSDs on ZFS option:
 `zfs create /data1/volume1`
-`zfs set atime=off     data1/volume1`
+`zfs set atime=off data1/volume1`
 `zfs set recordsize=8K data1/volume1`
 `~/projects/docker-scripts/startElasticsearchContainer.sh 5 16 --data /data1/volume1/es5`
+
+`curl -XPUT "http://localhost:9200/.kibana/_settings" -d '{"index": {"number_of_replicas": 0}}'`
 
