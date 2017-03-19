@@ -261,24 +261,24 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defn extract-to-csv [file]
-  (with-open [in (-> file io/file clojure.java.io/input-stream java.util.zip.GZIPInputStream.)]
-    (with-open [out (-> file (string/replace #"/data/" "/data_out/") io/file clojure.java.io/output-stream java.util.zip.GZIPOutputStream. io/writer)]
-      (let [_            (my-println-f "started")
-            cols         (-> fields keys set (disj :pickup-pos :dropoff-pos) sort)
-            docs         (parse-trips file in)
-            dt-format   #(let [[y1 y2 m d h i s] (->> % (remove #{\T \Z}) (partition 2) (map (partial apply str)))] (str y1 y2 \- m \- d \space h \: i \: s))
-            get-cols    #(map (fn [col] (or (col %) "NULL")) cols)
-            n-docs       (atom 0)
-            _            (csv/write-csv out
-                           (concat
-                             [(for [col cols] (-> col str (subs 1)))]
-                             (for [doc docs]
-                               (do (swap! n-docs inc)
-                                   (-> doc
-                                       (update :pickup-dt  dt-format)
-                                       (update :dropoff-dt dt-format)
-                                       get-cols)))))]
-        (my-println-f (str "finished, " @n-docs " rows"))))))
+  (with-open [in  (-> file io/file clojure.java.io/input-stream java.util.zip.GZIPInputStream.)
+              out (-> file (string/replace #"/data/" "/data_out/") io/file clojure.java.io/output-stream java.util.zip.GZIPOutputStream. io/writer)]
+    (let [_            (my-println-f "started")
+          cols         (-> fields keys set (disj :pickup-pos :dropoff-pos) sort)
+          docs         (parse-trips file in)
+          dt-format   #(let [[y1 y2 m d h i s] (->> % (remove #{\T \Z}) (partition 2) (map (partial apply str)))] (str y1 y2 \- m \- d \space h \: i \: s))
+          get-cols    #(map (fn [col] (or (col %) "NULL")) cols)
+          n-docs       (atom 0)
+          _            (csv/write-csv out
+                         (concat
+                           [(for [col cols] (-> col str (subs 1)))]
+                           (for [doc docs]
+                             (do (swap! n-docs inc)
+                                 (-> doc
+                                     (update :pickup-dt  dt-format)
+                                     (update :dropoff-dt dt-format)
+                                     get-cols)))))]
+      (my-println-f (str "finished, " @n-docs " rows")))))
 
 ;(extract-to-csv (str data-folder "green_tripdata_2013-08.csv.gz"))
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -298,11 +298,11 @@
                      ;:_source {:enabled false}
                       :properties (->> (map vector (keys fields) (map es-types (vals fields)))
                                        (into {}))}}
-   :settings {"index.translog.flush_threshold_size" "1g"
+   :settings {"index.translog.flush_threshold_size" "20g"
               "index.store.throttle.max_bytes_per_sec" "1000mb"
-              :number_of_shards 1
+              :number_of_shards 10
               :number_of_replicas 0
-              :refresh_interval "10s"}})
+              :refresh_interval "30s"}})
 ;(pprint taxi-mapping)
 
 (def es-config
@@ -334,16 +334,13 @@
                                   (do 
                                     (my-println-f "Exception " (.getMessage e) ", retrying after " retry-t  " ms...")
                                     (Thread/sleep retry-t))))))
-          process-chunk (fn [i chunk-in]
-                          (let [result (doall (for [sub-chunk (->> chunk-in (my-distinct get-doc-id) (partition-all 500))]
-                                                (let [chunk-body (->> chunk-in (map doc->bulk) flatten s/chunks->body)]
-                                                ; Call insert-chunk until it returns non-nil. I was going to recur
-                                                ; but it could not be done from "catch" position so this is what I came up with
-                                                  (->> #(insert-chunk chunk-body) repeatedly (filter some?) first))))
-                                _ (my-println-f "  finished chunk " i ", so far " @collision-counter " duplicates")]
-                            result))
+          process-chunk (fn [chunk-in]
+                          (let [chunk-body (->> chunk-in (map doc->bulk) flatten s/chunks->body)]
+                          ; Call insert-chunk until it returns non-nil. I was going to recur
+                          ; but it could not be done from "catch" position so this is what I came up with
+                            (->> #(insert-chunk chunk-body) repeatedly (filter some?) first)))
           _       (my-println-f "started")
-          freqs   (->> (parse-trips file in) (partition-all 10000) (map process-chunk (range)) flatten frequencies)
+          freqs   (->> (parse-trips file in) (partition-all 1000) (map process-chunk) flatten frequencies)
           _       (my-println-f "got " freqs)]
         freqs)))
 
@@ -351,13 +348,13 @@
   {"insert"  insert-file
    "extract" extract-to-csv})
 
-; time ls ../data/*.gz | grep -E '(yellow|green)' | shuf | xargs java -Xms16g -Xmx30g -jar target/taxi-rides-clj-0.0.1-SNAPSHOT-standalone.jar insert  6
+; time ls ../data/*.gz | grep -E '(yellow|green)' | shuf | xargs java -Xms16g -Xmx30g -jar target/taxi-rides-clj-0.0.1-SNAPSHOT-standalone.jar insert  4
 ; time ls ../data/*.gz | grep -E '(yellow|green)' | shuf | xargs java -Xms16g -Xmx30g -jar target/taxi-rides-clj-0.0.1-SNAPSHOT-standalone.jar extract 8
 (defn -main [f-name n-parallel & files]
   (do
     (my-println "Started!")
     (create-taxicab-template)
     (doall (cp/upfor (Integer. ^String n-parallel) [file files] (->> (string/replace file #".+/" "") (str data-folder) ((main-funs f-name)))))
-    (my-println "Done, filtered " @collision-counter " duplicate documents")
+  ; (my-println "Done, filtered " @collision-counter " duplicate documents")
     (shutdown-agents)
     (System/exit 0)))
