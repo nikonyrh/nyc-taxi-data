@@ -235,13 +235,13 @@
   (let [file-out (string/replace file "/data/" "/data_out/")
         file-tmp (string/replace file-out #"$" ".tmp")
         n-docs   (atom 0)]
-    (with-open [in  (-> file io/file clojure.java.io/input-stream java.util.zip.GZIPInputStream.)
+    (with-open [in  (-> file     io/file clojure.java.io/input-stream java.util.zip.GZIPInputStream.)
                 out (-> file-tmp io/file clojure.java.io/output-stream java.util.zip.GZIPOutputStream. io/writer)]
       (let [_            (u/my-println-f "started")
             cols         (-> fields keys set (disj :pickup-pos :dropoff-pos) sort)
             docs         (parse-trips file in)
             dt-format   #(let [[y1 y2 m d h i s] (->> % (remove #{\T \Z}) (partition 2) (map (partial apply str)))] (str y1 y2 \- m \- d \space h \: i \: s))
-            get-cols    #(map (fn [col] (or (col %) "NULL")) cols)
+            get-cols    #(map (fn [col] (or (col %) "")) cols)
             _            (csv/write-csv out
                            (concat
                              [(for [col cols] (-> col str (subs 1)))]
@@ -250,7 +250,8 @@
                                    (-> doc
                                        (update :pickup-dt  dt-format)
                                        (update :dropoff-dt dt-format)
-                                       get-cols)))))]))
+                                       get-cols))))
+                           :newline :cr+lf)]))
     (.renameTo (java.io.File. file-tmp) (java.io.File. file-out))
     (u/my-println-f (str "finished, " @n-docs " rows"))
     {:generated @n-docs}))
