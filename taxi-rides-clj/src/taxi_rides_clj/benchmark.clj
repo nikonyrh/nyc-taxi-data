@@ -6,12 +6,22 @@
             
             [taxi-rides-clj.utilities :as u]))
 
-(defn get-fn-name [f] (->> f str (re-find #"\$(.+)@") second))
 (defn percentiles [ps values]
   (let [values   (-> values sort vec)
         n-values (dec (count values))]
     (->> (zipmap ps (map #(get values (Math/round (* % 0.01 n-values))) ps))
          (into (sorted-map)))))
+
+(def es-config
+  {:server (u/getenv "ES_SERVER" "192.168.0.100:9200")})
+
+(defn make-client [] (s/client {:hosts [(str "http://" (:server es-config))]}))
+
+(defn run-query [client query]
+  (s/request client {:url "taxicab-*/_search" :method :post
+                     :body query}))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (let [km-per-degrees (/ 40075.0 360.0)
       random-obj     (java.util.Random.)
@@ -39,19 +49,23 @@
   ([start-from start-to interval-len postprocess]
    (let [start-range (- start-to start-from)]
      (fn [] (let [start-range (-> (rand) (* start-range) (+ start-from))]
-              (mapv postprocess [start-range (+ start-range interval-len)]))))))
+              (->> [start-range (+ start-range interval-len)]
+                (map postprocess)
+                (zipmap [:gte :lte])))))))
 
 (defn date-range-generator "A random interval of dates" [start-from-str start-to-str interval-len-days]
-  (let [utc-zone             (java.time.ZoneId/of "UTC")
-        int-parser           (fn [^String s] (Integer. s))
-        date-parser         #(->> % (re-seq #"[0-9]+") (map int-parser) (apply t/local-date-time))
-        to-epoch             (fn [^java.time.LocalDateTime dt] (-> dt (.atZone utc-zone) ((fn [^java.time.ZonedDateTime dt] (.toEpochSecond dt)))))
-        s-in-day             (* 24 60 60)
-        ms-in-day            (* s-in-day 1000)
-        start-from           (-> start-from-str date-parser to-epoch (quot s-in-day))
-        start-to             (-> start-to-str   date-parser to-epoch (quot s-in-day))]
+  (let [utc-zone          (java.time.ZoneId/of "UTC")
+        int-parser        (fn [^String s] (Integer. s))
+        date-parser      #(->> % (re-seq #"[0-9]+") (map int-parser) (apply t/local-date-time))
+        to-epoch          (fn [^java.time.LocalDateTime dt] (-> dt (.atZone utc-zone) ((fn [^java.time.ZonedDateTime dt] (.toEpochSecond dt)))))
+        s-in-day          (* 24 60 60)
+        ms-in-day         (* s-in-day 1000)
+        start-from        (-> start-from-str date-parser to-epoch (quot s-in-day))
+        start-to          (-> start-to-str   date-parser to-epoch (quot s-in-day))]
     (range-generator start-from start-to interval-len-days (comp (partial * ms-in-day) int))))
-;(->> (date-range-generator "2013-01-01" "2013-01-08" 2) (repeatedly 3))
+; (->> (date-range-generator "2013-01-01" "2013-01-08" 2) (repeatedly 3))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (def filters
   {:from-to-time
@@ -61,7 +75,7 @@
              :query
              {:bool
                {:filter
-                 [{:range            {:pickup-dt  (zipmap [:gte :lte] (date-range-fn))}}
+                 [{:range            {:pickup-dt  (date-range-fn)}}
                   {:geo_bounding_box {:pickup-pos (rect-fn)}}]}}}))
    
    :travelh-npassengers
@@ -71,7 +85,7 @@
              :query
              {:bool
                {:filter
-                 [{:range {:travel-h     (zipmap [:gte :lte] (travelh-fn))}}
+                 [{:range {:travel-h     (travelh-fn)}}
                   {:term  {:n-passengers (npassengers-fn)}}]}}}))
    
    :time-pickupday-paidtip
@@ -82,16 +96,13 @@
              :query
              {:bool
                {:filter
-                 [{:range {:pickup-dt  (zipmap [:gte :lte] (date-range-fn))}}
-                  {:range {:paid-tip   (zipmap [:gte :lte] (paidtip-fn))}}
+                 [{:range {:pickup-dt  (date-range-fn)}}
+                  {:range {:paid-tip   (paidtip-fn)}}
                   {:term  {:pickup-day (pickupday-fn)}}]}}}))})
 
 ; (->> filters vals (mapv #(%)) (json/write-str) println)
 
-(let [make-fn (fn [aggs]
-                (fn [client query]
-                  (s/request client {:url "taxicab-*/_search" :method :post
-                                     :body (if-not aggs query (assoc query :aggs aggs))})))]
+(let [make-fn (fn [aggs] (fn [query] (if-not aggs query (assoc query :aggs aggs))))]
   (def aggregations
     {:es-count
      (make-fn nil)
@@ -100,41 +111,47 @@
      (make-fn
        {:time-of-day
         {:histogram
-         {:field "pickup-time" :interval 1}
+         {:field "pickup-time" :interval 2}
          :aggs {:paid-total-stats {:stats {:field "paid-total"}}}}})
     
-     :paid-total-per-km-avg-by-company
+     :paid-total-per-km-stats-by-company-and-day
      (make-fn
        {:company
         {:terms
          {:field "company" :size 10}
          :aggs
-          {:paid-total-per-person-avg
-           {:avg {:script
-                  {:lang "painless"
-                   :inline "doc['paid-total'].value / doc['travel-km'].value"}}}}}})
+          {:day
+           {:date_histogram
+            {:field "pickup-dt" :interval "1d"}
+            :aggs
+             {:paid-total-per-person-avg
+              {:stats {:script
+                       {:lang "painless"
+                        :inline "doc['paid-total'].value / doc['travel-km'].value"}}}}}}}})
 
-     :speed-kmph-percentiles
+     :speed-kmph-percentiles-by-day
      (make-fn
-       {:paid-total-perc
-        {:percentiles {:field "speed-kmph"
-                       :percents [5 10 25 50 75 90 95]}}})}))
+       {:day
+        {:date_histogram
+         {:field "pickup-dt" :interval "1d"}
+         :aggs
+          {:speed-kmph-perc
+           {:percentiles {:field "speed-kmph"
+                          :percents [5 10 25 50 75 90 95]}}}}})}))
 
 
 ; (->> ((:from-to-time filters)) (json/write-str) println)
-; (->> ((:time-pickupday filters)) ((:paid-total-per-km-avg-by-company aggregations) (make-client)))
+; (->> ((:time-pickupday-paidtip filters)) ((:paid-total-per-km-avg-by-company aggregations)) (json/write-str) println)
+; (->> ((:time-pickupday-paidtip filters)) ((:paid-total-per-km-avg-by-company aggregations)) (run-query (make-client)))
 
-(def es-config
-  {:server (u/getenv "ES_SERVER" "192.168.0.100:9200")})
-
-(defn make-client [] (s/client {:hosts [(str "http://" (:server es-config))]}))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defn benchmark-es [filter-generators aggregations n-tries n-parallels]
   (let [percentiles (partial percentiles [5 10 25 50 75 90 95])
         client    (make-client)
         benchmark (fn [filter-generator aggregation]
                     (let [t-start (System/nanoTime)
-                          result  (aggregation client (filter-generator))
+                          result  (->> (filter-generator) aggregation (run-query client))
                           t-end   (System/nanoTime)]
                       {:took (- t-end t-start)
                      ; :result result
@@ -142,7 +159,8 @@
     (doall (for [n-parallel                     n-parallels
                  [filter-name filter-generator] filter-generators
                  [aggregation-name aggregation] aggregations]
-             (let [t-start   (System/nanoTime)
+             (let [_         nil ; (u/my-println "Started " [filter-name aggregation-name n-parallel])
+                   t-start   (System/nanoTime)
                    results   (doall (cp/upfor n-parallel [i (range n-tries)] (benchmark filter-generator aggregation)))
                    took      (-> (System/nanoTime) (- t-start) (* 0.000001) Math/round)
                    avg       (/ took n-tries 1.0)
@@ -158,5 +176,125 @@
 
 (comment
   (do (println "")
-      (clojure.pprint/pprint (benchmark-es filters aggregations 100 [1]))))
+      (clojure.pprint/pprint (benchmark-es filters aggregations 50 [1]))))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defn to-sql-field [kw] (-> kw name (clojure.string/replace #"-" "_")))
+
+(defn epoch-to-str [epoch]
+  (-> epoch t/instant str (subs 0 19) (clojure.string/replace #"T" " ")))
+
+(defn parse-filter [f]
+  (let [[f-type f-rest] (first f)
+        [field  f-args] (first f-rest)]
+    [f-type (to-sql-field field) f-args]))
+
+(defn col-a-as-b [a b] (if (= a b) a (format "%s AS %s" a b)))
+
+(let [group-by? #{:terms :histogram :date_histogram}
+      sql-fn?   #{:avg :sum :min :max :count}
+      to-sql-fn (fn [agg-type field]
+                  (let [sql-agg    (to-sql-field agg-type)
+                        tidy-field (clojure.string/replace field #" [^ ] " "_")]
+                    {:fun (col-a-as-b field tidy-field)
+                     :tmp tidy-field
+                     :col (format "%s(%s) AS %s_%s" sql-agg tidy-field sql-agg tidy-field)}))
+      
+      multi-fns  {:stats [:sum :min :max]}]  ; Leaving out count and avg from this...
+  (defn parse-aggs [agg]
+    (loop [agg agg result ()]
+      (if-not agg
+        (apply merge-with concat result)
+        (let [_         (assert (= 1 (count agg)) "Currently only supports one aggregation / hierarchy level")
+              [key agg] (-> agg first)
+              agg-type  (-> agg keys set (disj :aggs) first)
+              agg-data  (agg agg-type)
+              field     (-> agg-data (#(or (some-> % :field to-sql-field)
+                                           (-> % :script :inline
+                                               (clojure.string/replace #"doc\['([^']+)'\]\.value" "$1")
+                                               (clojure.string/replace #"([a-z])-([a-z])"         "$1_$2")))))
+              
+              gen-col-name 
+              (fn [field name interval]
+                (-> (format "%s_%s_%.1f" field name interval) (clojure.string/replace #"\." "")))
+              
+              this-agg  
+              (if (group-by? agg-type)
+                {:group-by 
+                 (case agg-type
+                   :terms
+                   [{:agg field :col field}]
+                   
+                   :histogram
+                   (let [interval (-> agg-data :interval float)]
+                     [{:agg (format "ROUND(%s / %.1f)" field interval)
+                       :col (gen-col-name field "hist" interval)}])
+                   
+                   :date_histogram
+                   (let [_            (assert (= \d (-> agg-data :interval last)) "Only days are supported for now")
+                         interval     (-> agg-data :interval butlast (#(Float. (apply str %))))
+                         interval-div (if (= 1.0 interval) "" (" / %.1f" interval))]
+                     [{:agg (format "FLOOR(CAST(CAST(%s AS datetime) AS float)%s)" field interval-div)
+                       :col (gen-col-name field "datehist" interval)}]))}
+                
+                {:metrics
+                 (cond
+                   (sql-fn? agg-type)
+                   [(to-sql-fn agg-type field)]
+                   
+                   (multi-fns agg-type)
+                   (for [sub-agg-type (multi-fns agg-type)]
+                     (to-sql-fn sub-agg-type field))
+                   
+                   (= :percentiles agg-type)
+                   (for [percent (:percents agg-data)]
+                     (let [gen-field (format "%s_p%02d" field percent)]
+                       {:fun field
+                        :tmp (format "PERCENTILE_DISC(0.%02d) WITHIN GROUP (ORDER BY %s) OVER (PARTITION BY {GROUP_BY}) AS %s" percent field gen-field)
+                        :col (format "MIN(%s) AS %s" gen-field gen-field)})))})]
+          (recur (:aggs agg) (conj result this-agg)))))))
+
+
+; (->> ((:time-pickupday-paidtip filters)) ((:paid-total-per-km-stats-by-company-and-day aggregations)) clojure.pprint/pprint)
+; (->> ((:time-pickupday-paidtip filters)) ((:speed-kmph-percentiles-by-day aggregations)) :aggs parse-aggs clojure.pprint/pprint)
+; (->> ((:time-pickupday-paidtip filters)) ((:paid-total-per-km-stats-by-company-and-day aggregations)) :aggs parse-aggs clojure.pprint/pprint)
+
+(defn es-to-sql [query]
+  (let [wheres (for [[f-type field f-args] (->> query :query :bool :filter (map parse-filter))]
+                  (let [convert (if (clojure.string/ends-with? field "_dt") epoch-to-str identity)]
+                    (case f-type
+                      :range {:str (str field " BETWEEN ? AND ?") :args (mapv (comp convert f-args) [:gte :lte])}
+                      :term  {:str (str field " = ?")             :args [f-args]})))
+        where-str    (->> (map :str wheres) (clojure.string/join " AND ") (str " WHERE "))
+        where-args   (mapcat :args wheres)
+        
+        agg-params   (-> query :aggs parse-aggs)
+        get-params   (fn [param-type param-key] (->> agg-params param-type (map param-key)))
+        
+        grb-aggs     (get-params :group-by :agg)
+        grb-cols     (get-params :group-by :col)
+        
+        mtr-funs     (get-params :metrics  :fun)
+        mtr-tmps     (get-params :metrics  :tmp)
+        mtr-cols     (get-params :metrics  :col)
+        
+        comma-join  #(clojure.string/join ", " %)
+        sql-str      (-> (str "\nSELECT " (comma-join (concat grb-cols mtr-cols ["COUNT(1) as n_rows"]))
+                              "\nFROM ("
+                              "\n  SELECT " (comma-join (concat grb-cols (-> mtr-tmps set sort)))
+                              "\n  FROM ("
+                              "\n    SELECT " (comma-join
+                                                (concat
+                                                  (map col-a-as-b grb-aggs grb-cols)
+                                                  (-> mtr-funs set sort)))
+                              "\n    " where-str
+                              "\n  ) t"
+                              "\n) t GROUP BY {GROUP_BY}\n")
+                         (clojure.string/replace "{GROUP_BY}" (comma-join grb-cols)))]
+    (into [] (concat [sql-str] where-args))))
+
+; (->> ((:time-pickupday-paidtip filters)) ((:speed-kmph-percentiles-by-day aggregations)) clojure.pprint/pprint)
+; (->> ((:time-pickupday-paidtip filters)) ((:paid-total-per-km-stats-by-company-and-day aggregations)) es-to-sql print)
+; (->> ((:time-pickupday-paidtip filters)) ((:speed-kmph-percentiles-by-day aggregations)) es-to-sql print)
+; (->> ((:time-pickupday-paidtip filters)) ((:paid-total-stats-by-time-of-day  aggregations)) es-to-sql print)
