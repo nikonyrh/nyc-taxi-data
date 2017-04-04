@@ -149,12 +149,7 @@
   (let [company           (->> file str (re-find #"([a-z]+)[^/]+$") second)
         vendor-lookup     (if (= company "green") {1 "Creative Mobile Technologies" 2 "VeriFone"})
         
-      ; This is simpler but reads the whole CSV into memory at once, which caused OOMs on larger files
-      ; csv-contents      (-> in slurp csv/read-csv)
-        
-      ; This version feeds lines to read-csv one by one, making the file parsing lazy
-        csv-contents      (->> in io/reader line-seq (map (comp first csv/read-csv)))
-        
+        csv-contents      (->> in io/reader csv/read-csv)
         header            (->> csv-contents first (map (comp string/lower-case string/trim)))
         missing           (clojure.set/difference (-> header set) (->> col-mapping keys (filter string?) set))
         _                 (if-not (empty? missing) (throw (Exception. (str "Missing cols for " missing " at " file))))
