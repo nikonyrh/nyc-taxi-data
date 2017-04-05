@@ -104,7 +104,7 @@
 
 (let [make-fn (fn [aggs] (fn [query] (if-not aggs query (assoc query :aggs aggs))))]
   (def aggregations
-    {:es-count
+    {:count
      (make-fn nil)
   
      :paid-total-stats-by-time-of-day 
@@ -205,7 +205,9 @@
   (defn parse-aggs [agg]
     (loop [agg agg result ()]
       (if-not agg
-        (apply merge-with concat result)
+        (if-not (empty? result)
+          (apply merge-with concat result)
+          {:group-by [{:agg "COUNT(1)" :col "n_rows"}]})
         (let [_         (assert (= 1 (count agg)) "Currently only supports one aggregation / hierarchy level")
               [key agg] (-> agg first)
               agg-type  (-> agg keys set (disj :aggs) first)
@@ -215,9 +217,7 @@
                                                (clojure.string/replace #"doc\['([^']+)'\]\.value" "$1")
                                                (clojure.string/replace #"([a-z])-([a-z])"         "$1_$2")))))
               
-              gen-col-name 
-              (fn [field name interval]
-                (-> (format "%s_%s_%.1f" field name interval) (clojure.string/replace #"\." "")))
+              gen-col-name (fn [field name interval] (format "%s_%s_%s" field name interval))
               
               this-agg  
               (if (group-by? agg-type)
@@ -228,15 +228,15 @@
                    
                    :histogram
                    (let [interval (-> agg-data :interval float)]
-                     [{:agg (format "ROUND(%s / %.1f)" field interval)
-                       :col (gen-col-name field "hist" interval)}])
+                     [{:agg (format "FLOOR(%s / %.1f)" field interval)
+                       :col (gen-col-name field "hist" (:interval agg-data))}])
                    
                    :date_histogram
                    (let [_            (assert (= \d (-> agg-data :interval last)) "Only days are supported for now")
                          interval     (-> agg-data :interval butlast (#(Float. (apply str %))))
-                         interval-div (if (= 1.0 interval) "" (" / %.1f" interval))]
+                         interval-div (if (= 1.0 interval) "" (format " / %.1f" interval))]
                      [{:agg (format "FLOOR(CAST(CAST(%s AS datetime) AS float)%s)" field interval-div)
-                       :col (gen-col-name field "datehist" interval)}]))}
+                       :col (gen-col-name field "datehist" (:interval agg-data))}]))}
                 
                 {:metrics
                  (cond
@@ -259,14 +259,25 @@
 ; (->> ((:time-pickupday-paidtip filters)) ((:paid-total-per-km-stats-by-company-and-day aggregations)) clojure.pprint/pprint)
 ; (->> ((:time-pickupday-paidtip filters)) ((:speed-kmph-percentiles-by-day aggregations)) :aggs parse-aggs clojure.pprint/pprint)
 ; (->> ((:time-pickupday-paidtip filters)) ((:paid-total-per-km-stats-by-company-and-day aggregations)) :aggs parse-aggs clojure.pprint/pprint)
+; (->> ((:count aggregations) {}) :aggs parse-aggs clojure.pprint/pprint)
 
 (defn es-to-sql [query]
-  (let [wheres (for [[f-type field f-args] (->> query :query :bool :filter (map parse-filter))]
+  (let [join        #(clojure.string/join % %2)
+        wheres (for [[f-type field f-args] (->> query :query :bool :filter (map parse-filter))]
                   (let [convert (if (clojure.string/ends-with? field "_dt") epoch-to-str identity)]
                     (case f-type
-                      :range {:str (str field " BETWEEN ? AND ?") :args (mapv (comp convert f-args) [:gte :lte])}
-                      :term  {:str (str field " = ?")             :args [f-args]})))
-        where-str    (->> (map :str wheres) (clojure.string/join " AND ") (str " WHERE "))
+                      :range {:str [(str field " BETWEEN ? AND ?")] :args (mapv (comp convert f-args) [:gte :lte])}
+                      :term  {:str [(str field " = ?")]             :args [f-args]}
+                      
+                      :geo_bounding_box
+                      {:str (let [field (subs field 0 (- (count field) 4))]
+                              [(str field "_lat BETWEEN ? AND ?")
+                               (str field "_lon BETWEEN ? AND ?")])
+                       
+                       ; This is truly terrible, but in essense we are picking just min and max of the bounding box's latitude and longitude
+                       ; and I didn't feel like writing lookup keywords to the four corners in the correct order.
+                       :args (mapcat #(apply (juxt min max) (map (comp % f-args) [:top_left :bottom_right])) [:lat :lon])})))
+        where-str    (->> (mapcat :str wheres) (join " AND\n      ") (str " WHERE\n      "))
         where-args   (mapcat :args wheres)
         
         agg-params   (-> query :aggs parse-aggs)
@@ -279,22 +290,51 @@
         mtr-tmps     (get-params :metrics  :tmp)
         mtr-cols     (get-params :metrics  :col)
         
-        comma-join  #(clojure.string/join ", " %)
-        sql-str      (-> (str "\nSELECT " (comma-join (concat grb-cols mtr-cols ["COUNT(1) as n_rows"]))
+        inner-sql    (str "\n    SELECT\n      "
+                            (join ",\n      " (concat
+                                                (map col-a-as-b grb-aggs grb-cols)
+                                                (-> mtr-funs set sort)))
+                           "\n    FROM taxi_trips"
+                           "\n   " where-str)
+        
+        outer-sql  (if (= (first grb-cols) "n_rows")
+                     ; A special case when only row count is calculated
+                     (-> inner-sql (clojure.string/replace "    " "") (str "\n\n"))
+                     
+                     ; The generic case with a few levels of aggregations
+                     (-> (str "\nSELECT\n  " (join ",\n  " (concat grb-cols mtr-cols ["SUM(1) AS n_rows"]))
                               "\nFROM ("
-                              "\n  SELECT " (comma-join (concat grb-cols (-> mtr-tmps set sort)))
+                              "\n  SELECT\n    " (join ",\n    " (concat grb-cols (-> mtr-tmps set sort)))
                               "\n  FROM ("
-                              "\n    SELECT " (comma-join
-                                                (concat
-                                                  (map col-a-as-b grb-aggs grb-cols)
-                                                  (-> mtr-funs set sort)))
-                              "\n    " where-str
+                              inner-sql
                               "\n  ) t"
-                              "\n) t GROUP BY {GROUP_BY}\n")
-                         (clojure.string/replace "{GROUP_BY}" (comma-join grb-cols)))]
-    (into [] (concat [sql-str] where-args))))
+                              "\n) t GROUP BY {GROUP_BY}\n\n")
+                         (clojure.string/replace "{GROUP_BY}" (join ", " grb-cols))))]
+    (into [outer-sql] where-args)))
 
 ; (->> ((:time-pickupday-paidtip filters)) ((:speed-kmph-percentiles-by-day aggregations)) clojure.pprint/pprint)
 ; (->> ((:time-pickupday-paidtip filters)) ((:paid-total-per-km-stats-by-company-and-day aggregations)) es-to-sql print)
 ; (->> ((:time-pickupday-paidtip filters)) ((:speed-kmph-percentiles-by-day aggregations)) es-to-sql print)
 ; (->> ((:time-pickupday-paidtip filters)) ((:paid-total-stats-by-time-of-day  aggregations)) es-to-sql print)
+; (->> ((:from-to-time filters)) ((:paid-total-per-km-stats-by-company-and-day aggregations)) es-to-sql print)
+
+
+(comment
+  (->> (for [[filter-name filter-generator] filters
+             [aggregation-name aggregation] aggregations]
+         (->> (filter-generator) aggregation es-to-sql
+              ((fn [[sql & args]] (apply format (clojure.string/replace sql #"\?" "%s")
+                                                (map #(if (string? %) (str \' % \') (str %)) args))))))
+       (apply str)
+       (spit "out.sql")))
+
+
+(comment
+  (->> (for [[filter-name filter-generator] filters
+             [aggregation-name aggregation] aggregations]
+         (aggregation (filter-generator)))
+       (map json/write-str)
+       (#(concat % ["" ""]))
+       (clojure.string/join "\n")
+       (spit "out.json")))
+      
