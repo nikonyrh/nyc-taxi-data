@@ -1,0 +1,474 @@
+{
+  "size": 0,
+  "query": {
+    "bool": {
+      "filter": [{
+        "range": {
+          "pickup-dt": {
+            "gte": 1430611200000,
+            "lte": 1431820800000
+          }
+        }
+      }, {
+        "geo_bounding_box": {
+          "pickup-pos": {
+            "top_left": {
+              "lat": 40.7618427529124,
+              "lon": -73.90859280347779
+            },
+            "bottom_right": {
+              "lat": 40.743876439749585,
+              "lon": -73.89062649031497
+            }
+          }
+        }
+      }]
+    }
+  }
+}
+
+{
+  "size": 0,
+  "query": {
+    "bool": {
+      "filter": [{
+        "range": {
+          "pickup-dt": {
+            "gte": 1473206400000,
+            "lte": 1474416000000
+          }
+        }
+      }, {
+        "geo_bounding_box": {
+          "pickup-pos": {
+            "top_left": {
+              "lat": 40.799553448890066,
+              "lon": -74.07397320249441
+            },
+            "bottom_right": {
+              "lat": 40.78158713572725,
+              "lon": -74.0560068893316
+            }
+          }
+        }
+      }]
+    }
+  },
+  "aggs": {
+    "time-of-day": {
+      "histogram": {
+        "field": "pickup-time",
+        "interval": 2
+      },
+      "aggs": {
+        "paid-total-stats": {
+          "stats": {
+            "field": "paid-total"
+          }
+        }
+      }
+    }
+  }
+}
+
+{
+  "size": 0,
+  "query": {
+    "bool": {
+      "filter": [{
+        "range": {
+          "pickup-dt": {
+            "gte": 1400371200000,
+            "lte": 1401580800000
+          }
+        }
+      }, {
+        "geo_bounding_box": {
+          "pickup-pos": {
+            "top_left": {
+              "lat": 40.79920163262066,
+              "lon": -74.05695503275777
+            },
+            "bottom_right": {
+              "lat": 40.78123531945784,
+              "lon": -74.03898871959495
+            }
+          }
+        }
+      }]
+    }
+  },
+  "aggs": {
+    "company": {
+      "terms": {
+        "field": "company",
+        "size": 10
+      },
+      "aggs": {
+        "day": {
+          "date_histogram": {
+            "field": "pickup-dt",
+            "interval": "1d"
+          },
+          "aggs": {
+            "paid-total-per-person-avg": {
+              "stats": {
+                "script": {
+                  "lang": "painless",
+                  "inline": "doc['paid-total'].value / doc['travel-km'].value"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+{
+  "size": 0,
+  "query": {
+    "bool": {
+      "filter": [{
+        "range": {
+          "pickup-dt": {
+            "gte": 1474070400000,
+            "lte": 1475280000000
+          }
+        }
+      }, {
+        "geo_bounding_box": {
+          "pickup-pos": {
+            "top_left": {
+              "lat": 40.738579989551965,
+              "lon": -73.9871039491828
+            },
+            "bottom_right": {
+              "lat": 40.72061367638915,
+              "lon": -73.96913763601998
+            }
+          }
+        }
+      }]
+    }
+  },
+  "aggs": {
+    "day": {
+      "date_histogram": {
+        "field": "pickup-dt",
+        "interval": "1d"
+      },
+      "aggs": {
+        "speed-kmph-perc": {
+          "percentiles": {
+            "field": "speed-kmph",
+            "percents": [5, 10, 25, 50, 75, 90, 95]
+          }
+        }
+      }
+    }
+  }
+}
+
+{
+  "size": 0,
+  "query": {
+    "bool": {
+      "filter": [{
+        "range": {
+          "travel-h": {
+            "gte": 2.9339409167968102,
+            "lte": 3.1839409167968102
+          }
+        }
+      }, {
+        "term": {
+          "n-passengers": 1
+        }
+      }]
+    }
+  }
+}
+
+{
+  "size": 0,
+  "query": {
+    "bool": {
+      "filter": [{
+        "range": {
+          "travel-h": {
+            "gte": 2.2627463507564833,
+            "lte": 2.5127463507564833
+          }
+        }
+      }, {
+        "term": {
+          "n-passengers": 2
+        }
+      }]
+    }
+  },
+  "aggs": {
+    "time-of-day": {
+      "histogram": {
+        "field": "pickup-time",
+        "interval": 2
+      },
+      "aggs": {
+        "paid-total-stats": {
+          "stats": {
+            "field": "paid-total"
+          }
+        }
+      }
+    }
+  }
+}
+
+{
+  "size": 0,
+  "query": {
+    "bool": {
+      "filter": [{
+        "range": {
+          "travel-h": {
+            "gte": 2.7436055252231615,
+            "lte": 2.9936055252231615
+          }
+        }
+      }, {
+        "term": {
+          "n-passengers": 5
+        }
+      }]
+    }
+  },
+  "aggs": {
+    "company": {
+      "terms": {
+        "field": "company",
+        "size": 10
+      },
+      "aggs": {
+        "day": {
+          "date_histogram": {
+            "field": "pickup-dt",
+            "interval": "1d"
+          },
+          "aggs": {
+            "paid-total-per-person-avg": {
+              "stats": {
+                "script": {
+                  "lang": "painless",
+                  "inline": "doc['paid-total'].value / doc['travel-km'].value"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+{
+  "size": 0,
+  "query": {
+    "bool": {
+      "filter": [{
+        "range": {
+          "travel-h": {
+            "gte": 0.037433065512208485,
+            "lte": 0.2874330655122085
+          }
+        }
+      }, {
+        "term": {
+          "n-passengers": 1
+        }
+      }]
+    }
+  },
+  "aggs": {
+    "day": {
+      "date_histogram": {
+        "field": "pickup-dt",
+        "interval": "1d"
+      },
+      "aggs": {
+        "speed-kmph-perc": {
+          "percentiles": {
+            "field": "speed-kmph",
+            "percents": [5, 10, 25, 50, 75, 90, 95]
+          }
+        }
+      }
+    }
+  }
+}
+
+{
+  "size": 0,
+  "query": {
+    "bool": {
+      "filter": [{
+        "range": {
+          "pickup-dt": {
+            "gte": 1377993600000,
+            "lte": 1383177600000
+          }
+        }
+      }, {
+        "range": {
+          "paid-tip": {
+            "gte": 0.6382266790722257,
+            "lte": 2.6382266790722255
+          }
+        }
+      }, {
+        "term": {
+          "pickup-day": 2
+        }
+      }]
+    }
+  }
+}
+
+{
+  "size": 0,
+  "query": {
+    "bool": {
+      "filter": [{
+        "range": {
+          "pickup-dt": {
+            "gte": 1409270400000,
+            "lte": 1414454400000
+          }
+        }
+      }, {
+        "range": {
+          "paid-tip": {
+            "gte": 10.492135883597886,
+            "lte": 12.492135883597886
+          }
+        }
+      }, {
+        "term": {
+          "pickup-day": 6
+        }
+      }]
+    }
+  },
+  "aggs": {
+    "time-of-day": {
+      "histogram": {
+        "field": "pickup-time",
+        "interval": 2
+      },
+      "aggs": {
+        "paid-total-stats": {
+          "stats": {
+            "field": "paid-total"
+          }
+        }
+      }
+    }
+  }
+}
+
+{
+  "size": 0,
+  "query": {
+    "bool": {
+      "filter": [{
+        "range": {
+          "pickup-dt": {
+            "gte": 1437091200000,
+            "lte": 1442275200000
+          }
+        }
+      }, {
+        "range": {
+          "paid-tip": {
+            "gte": 9.97640280506475,
+            "lte": 11.97640280506475
+          }
+        }
+      }, {
+        "term": {
+          "pickup-day": 5
+        }
+      }]
+    }
+  },
+  "aggs": {
+    "company": {
+      "terms": {
+        "field": "company",
+        "size": 10
+      },
+      "aggs": {
+        "day": {
+          "date_histogram": {
+            "field": "pickup-dt",
+            "interval": "1d"
+          },
+          "aggs": {
+            "paid-total-per-person-avg": {
+              "stats": {
+                "script": {
+                  "lang": "painless",
+                  "inline": "doc['paid-total'].value / doc['travel-km'].value"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+{
+  "size": 0,
+  "query": {
+    "bool": {
+      "filter": [{
+        "range": {
+          "pickup-dt": {
+            "gte": 1380931200000,
+            "lte": 1386115200000
+          }
+        }
+      }, {
+        "range": {
+          "paid-tip": {
+            "gte": 1.2609835130694136,
+            "lte": 3.2609835130694136
+          }
+        }
+      }, {
+        "term": {
+          "pickup-day": 3
+        }
+      }]
+    }
+  },
+  "aggs": {
+    "day": {
+      "date_histogram": {
+        "field": "pickup-dt",
+        "interval": "1d"
+      },
+      "aggs": {
+        "speed-kmph-perc": {
+          "percentiles": {
+            "field": "speed-kmph",
+            "percents": [5, 10, 25, 50, 75, 90, 95]
+          }
+        }
+      }
+    }
+  }
+}
