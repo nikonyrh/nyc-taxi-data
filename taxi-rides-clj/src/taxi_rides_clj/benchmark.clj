@@ -146,22 +146,14 @@
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(defn benchmark-es [filter-generators aggregations n-tries n-parallels]
-  (let [percentiles (partial percentiles [5 10 25 50 75 90 95])
-        client    (make-client)
-        benchmark (fn [filter-generator aggregation]
-                    (let [t-start (System/nanoTime)
-                          result  (->> (filter-generator) aggregation (run-query client))
-                          t-end   (System/nanoTime)]
-                      {:took (- t-end t-start)
-                     ; :result result
-                       :hits (-> result :body :hits :total)}))]
+(defn run-benchmark [benchmark-fn filter-generators aggregations n-tries n-parallels]
+  (let [percentiles (partial percentiles [5 10 25 50 75 90 95])]
     (doall (for [n-parallel                     n-parallels
                  [filter-name filter-generator] filter-generators
                  [aggregation-name aggregation] aggregations]
              (let [_         nil ; (u/my-println "Started " [filter-name aggregation-name n-parallel])
                    t-start   (System/nanoTime)
-                   results   (doall (cp/upfor n-parallel [i (range n-tries)] (benchmark filter-generator aggregation)))
+                   results   (doall (cp/upfor n-parallel [i (range n-tries)] (benchmark-fn filter-generator aggregation)))
                    took      (-> (System/nanoTime) (- t-start) (* 0.000001) Math/round)
                    avg       (/ took n-tries 1.0)
                    _         (u/my-println "Finished " [filter-name aggregation-name n-parallel] " in " took " ms, avg " avg " ms")
@@ -173,6 +165,18 @@
                 :aggs          aggregation-name
                 :avg           avg
                 :stats         (->> [p-took p-hits] (map vals) (apply zipmap) (into (sorted-map)))})))))
+
+
+(defn benchmark-es [& args]
+  (let [client       (make-client)
+        benchmark-fn (fn [filter-generator aggregation]
+                       (let [t-start (System/nanoTime)
+                             result  (->> (filter-generator) aggregation (run-query client))
+                             t-end   (System/nanoTime)]
+                         {:took (- t-end t-start)
+                        ; :result result
+                          :hits (-> result :body :hits :total)}))]
+    (apply run-benchmark benchmark-fn args)))
 
 (comment
   (do (println "")
