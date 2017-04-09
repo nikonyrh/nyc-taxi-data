@@ -147,7 +147,7 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defn run-benchmark [benchmark-fn filter-generators aggregations n-tries n-parallels]
-  (let [percentiles (partial percentiles [5 10 25 50 75 90 95])]
+  (let [percentiles (partial percentiles (vec (range 1 100)))]
     (doall (for [n-parallel                     n-parallels
                  [filter-name filter-generator] filter-generators
                  [aggregation-name aggregation] aggregations]
@@ -159,7 +159,7 @@
                    _         (u/my-println "Finished " [filter-name aggregation-name n-parallel] " in " took " ms, avg " avg " ms")
                    
                    p-took    (->> results (map #(-> % :took (* 0.001) Math/round (* 0.001))) percentiles)
-                   p-hits    (->> results (map :hits) percentiles)]
+                   p-hits    (->> results (map :hits) (filter some?) percentiles)]
                {:n-parallel    n-parallel
                 :filter        filter-name
                 :aggs          aggregation-name
@@ -171,16 +171,20 @@
   (let [client       (make-client)
         benchmark-fn (fn [filter-generator aggregation]
                        (let [t-start (System/nanoTime)
-                             result  (->> (filter-generator) aggregation (run-query client))
+                             result  (try
+                                       (->> (filter-generator) aggregation (run-query client))
+                                       (catch java.io.IOException e nil))
                              t-end   (System/nanoTime)]
                          {:took (- t-end t-start)
                         ; :result result
-                          :hits (-> result :body :hits :total)}))]
+                          :hits (some-> result :body :hits :total)}))]
     (apply run-benchmark benchmark-fn args)))
 
 (comment
-  (do (println "")
-      (clojure.pprint/pprint (benchmark-es filters aggregations 50 [1]))))
+  (let [results (benchmark-es filters aggregations 500 [1 2 4])]
+    (spit "results_es.edn" (with-out-str (clojure.pprint/pprint results)))
+    (println "")
+    (clojure.pprint/pprint results)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -221,7 +225,7 @@
                                                (clojure.string/replace #"doc\['([^']+)'\]\.value" "$1")
                                                (clojure.string/replace #"([a-z])-([a-z])"         "$1_$2")))))
               
-              gen-col-name (fn [field name interval] (format "%s_%s_%s" field name interval))
+              gen-col-name (fn [name] (format "%s_%s_%s" field name (:interval agg-data)))
               
               this-agg  
               (if (group-by? agg-type)
@@ -233,14 +237,15 @@
                    :histogram
                    (let [interval (-> agg-data :interval float)]
                      [{:agg (format "FLOOR(%s / %.1f)" field interval)
-                       :col (gen-col-name field "hist" (:interval agg-data))}])
+                       :col (gen-col-name "hist")}])
                    
                    :date_histogram
                    (let [_            (assert (= \d (-> agg-data :interval last)) "Only days are supported for now")
-                         interval     (-> agg-data :interval butlast (#(Float. (apply str %))))
+                         to-float     (fn [^String s] (Float. s))
+                         interval     (->> agg-data :interval butlast (apply str) to-float)
                          interval-div (if (= 1.0 interval) "" (format " / %.1f" interval))]
                      [{:agg (format "FLOOR(CAST(CAST(%s AS datetime) AS float)%s)" field interval-div)
-                       :col (gen-col-name field "datehist" (:interval agg-data))}]))}
+                       :col (gen-col-name "datehist")}]))}
                 
                 {:metrics
                  (cond
