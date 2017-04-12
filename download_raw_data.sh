@@ -1,4 +1,10 @@
 #!/bin/bash
+# Note that starting from July 2016 the TLC no longer provides pickup and dropoff coordinates.
+# Instead, each trip comes with taxi zone pickup and dropoff location IDs. The original toddwschneider's
+# code used a location ID lookup to get approximate locations but this project does not support those.
+
+# rm data/*_2016-0{7,8,9}*.csv.gz data/*_2016-1*.csv.gz
+
 cd "$(dirname "$(realpath "$0")")";
 set -e
 

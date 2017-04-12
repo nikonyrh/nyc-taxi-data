@@ -4,12 +4,14 @@
             [qbits.spandex :as s]
             [com.climate.claypoole :as cp]
             
-            [taxi-rides-clj.utilities :as u]))
+            [nikonyrh-utilities-clj.core :as u]))
 
 (defn percentiles [ps values]
   (let [values   (-> values sort vec)
         n-values (dec (count values))]
-    (->> (zipmap ps (map #(get values (Math/round (* % 0.01 n-values))) ps))
+    (->> ps
+         (map #(get values (Math/round (* % 0.01 n-values))))
+         (zipmap ps)
          (into (sorted-map)))))
 
 (def es-config
@@ -18,15 +20,12 @@
 (defn make-client [] (s/client {:hosts [(str "http://" (:server es-config))]}))
 
 (defn run-query [client query]
-  (s/request client {:url "taxicab-*/_search" :method :post
-                     :body query}))
-
+  (s/request client {:url "taxicab-*/_search" :method :post :body query}))
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (let [km-per-degrees (/ 40075.0 360.0)
       random-obj     (java.util.Random.)
-      randn          (fn [] (locking random-obj
-                              (.nextGaussian random-obj)))
+      randn          (fn [] (locking random-obj (.nextGaussian random-obj)))
       
       ; Midpoint at Madison Square, radius of 5.11 km extends to the tip of Manhattan
       nyc-pos {:lat  40.742054 :lon -73.987984}
@@ -64,7 +63,6 @@
         start-to          (-> start-to-str   date-parser to-epoch (quot s-in-day))]
     (range-generator start-from start-to interval-len-days (comp (partial * ms-in-day) int))))
 ; (->> (date-range-generator "2013-01-01" "2013-01-08" 2) (repeatedly 3))
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (def filters
@@ -143,7 +141,6 @@
 ; (->> ((:from-to-time filters)) (json/write-str) println)
 ; (->> ((:time-pickupday-paidtip filters)) ((:paid-total-per-km-avg-by-company aggregations)) (json/write-str) println)
 ; (->> ((:time-pickupday-paidtip filters)) ((:paid-total-per-km-avg-by-company aggregations)) (run-query (make-client)))
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defn run-benchmark [benchmark-fn filter-generators aggregations n-tries n-parallels]
@@ -185,7 +182,6 @@
     (spit "results_es.edn" (with-out-str (clojure.pprint/pprint results)))
     (println "")
     (clojure.pprint/pprint results)))
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defn to-sql-field [kw] (-> kw name (clojure.string/replace #"-" "_")))
