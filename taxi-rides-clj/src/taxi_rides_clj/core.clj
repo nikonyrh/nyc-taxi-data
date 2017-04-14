@@ -11,9 +11,7 @@
   (:import java.util.zip.GZIPInputStream)
   (:gen-class :main true))
 
-
 (set! *warn-on-reflection* true)
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (defmacro my-println-f [& forms]

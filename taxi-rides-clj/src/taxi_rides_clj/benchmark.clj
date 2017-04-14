@@ -6,6 +6,9 @@
             
             [nikonyrh-utilities-clj.core :as u]))
 
+(set! *warn-on-reflection* true)
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
 (defn percentiles [ps values]
   (let [values   (-> values sort vec)
         n-values (dec (count values))]
@@ -178,8 +181,8 @@
     (apply run-benchmark benchmark-fn args)))
 
 (comment
-  (let [results (benchmark-es filters aggregations 500 [1 2 4])]
-    (spit "results_es.edn" (with-out-str (clojure.pprint/pprint results)))
+  (let [results (benchmark-es filters aggregations 500 [1])]
+    (->> results (map #(assoc % :db "Elasticsearch")) clojure.pprint/pprint with-out-str (spit "results_es.edn"))
     (println "")
     (clojure.pprint/pprint results)))
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;

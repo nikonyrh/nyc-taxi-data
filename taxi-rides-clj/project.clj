@@ -6,6 +6,7 @@
                  [org.clojure/data.csv "0.1.3"]
                  [cc.qbits/spandex "0.3.4"]
                  [com.climate/claypoole "1.1.4"]
+                 [com.hypirion/clj-xchart "0.2.0"]
                  
                  [org.clojars.nikonyrh.utilities-clj "0.1.2"]]
   :javac-options ["-target" "1.8" "-source" "1.8" "-Xlint:-options"]
