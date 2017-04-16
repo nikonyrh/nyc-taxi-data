@@ -5,6 +5,7 @@
 !*.sql
 !*.rb
 !*.clj
+!*.edn
 !*_urls.txt
 !*.sh
 !taxi_zones
