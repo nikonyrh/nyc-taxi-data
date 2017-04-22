@@ -102,7 +102,7 @@
    220.853 741715,
    317.741 838787,
    394.159 957924},
-  :db "Elasticsearch 6700K"}
+  :db "Elasticsearch 6700K 64G"}
  {:n-parallel 1,
   :filter :from-to-time,
   :aggs :paid-total-stats-by-time-of-day,
@@ -207,7 +207,7 @@
    105.447 780988,
    108.875 847983,
    110.61200000000001 910442},
-  :db "Elasticsearch 6700K"}
+  :db "Elasticsearch 6700K 64G"}
  {:n-parallel 1,
   :filter :from-to-time,
   :aggs :paid-total-per-km-stats-by-company-and-day,
@@ -312,7 +312,7 @@
    110.843 790082,
    119.602 835284,
    125.191 941206},
-  :db "Elasticsearch 6700K"}
+  :db "Elasticsearch 6700K 64G"}
  {:n-parallel 1,
   :filter :from-to-time,
   :aggs :speed-kmph-percentiles-by-day,
@@ -417,7 +417,7 @@
    142.423 750851,
    150.852 800261,
    166.061 951786},
-  :db "Elasticsearch 6700K"}
+  :db "Elasticsearch 6700K 64G"}
  {:n-parallel 1,
   :filter :travelh-npassengers,
   :aggs :count,
@@ -522,7 +522,7 @@
    873.647 35196774,
    1170.808 87860004,
    1671.07 280585858},
-  :db "Elasticsearch 6700K"}
+  :db "Elasticsearch 6700K 64G"}
  {:n-parallel 1,
   :filter :travelh-npassengers,
   :aggs :paid-total-stats-by-time-of-day,
@@ -627,7 +627,7 @@
    1471.723 42176286,
    2078.8540000000003 65626567,
    2474.722 123310659},
-  :db "Elasticsearch 6700K"}
+  :db "Elasticsearch 6700K 64G"}
  {:n-parallel 1,
   :filter :travelh-npassengers,
   :aggs :paid-total-per-km-stats-by-company-and-day,
@@ -732,7 +732,7 @@
    2131.215 39235115,
    2726.016 56046265,
    4421.522 111478043},
-  :db "Elasticsearch 6700K"}
+  :db "Elasticsearch 6700K 64G"}
  {:n-parallel 1,
   :filter :travelh-npassengers,
   :aggs :speed-kmph-percentiles-by-day,
@@ -837,7 +837,7 @@
    7466.371 59603869,
    9237.368 87030345,
    22209.057 226610728},
-  :db "Elasticsearch 6700K"}
+  :db "Elasticsearch 6700K 64G"}
  {:n-parallel 1,
   :filter :time-pickupday-paidtip,
   :aggs :count,
@@ -942,7 +942,7 @@
    304.242 1361971,
    336.91200000000003 1455678,
    404.089 1553681},
-  :db "Elasticsearch 6700K"}
+  :db "Elasticsearch 6700K 64G"}
  {:n-parallel 1,
   :filter :time-pickupday-paidtip,
   :aggs :paid-total-stats-by-time-of-day,
@@ -1047,7 +1047,7 @@
    144.802 1482564,
    150.93200000000002 1555783,
    173.838 1626254},
-  :db "Elasticsearch 6700K"}
+  :db "Elasticsearch 6700K 64G"}
  {:n-parallel 1,
   :filter :time-pickupday-paidtip,
   :aggs :paid-total-per-km-stats-by-company-and-day,
@@ -1152,7 +1152,7 @@
    176.806 1456025,
    183.422 1511613,
    191.988 1555062},
-  :db "Elasticsearch 6700K"}
+  :db "Elasticsearch 6700K 64G"}
  {:n-parallel 1,
   :filter :time-pickupday-paidtip,
   :aggs :speed-kmph-percentiles-by-day,
@@ -1257,4 +1257,4 @@
    204.312 1336016,
    218.66 1452208,
    238.516 1496549},
-  :db "Elasticsearch 6700K"})
+  :db "Elasticsearch 6700K 64G"})
