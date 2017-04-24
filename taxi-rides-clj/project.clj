@@ -8,7 +8,10 @@
                  [com.climate/claypoole "1.1.4"]
                  [com.hypirion/clj-xchart "0.2.0"]
                  
-                 [org.clojars.nikonyrh.utilities-clj "0.1.2"]]
+                 [org.clojure/java.jdbc "0.7.0-alpha2"]
+                 [sqljdbc4/sqljdbc4 "4.2"]
+                 
+                 [org.clojars.nikonyrh.utilities-clj "0.1.3"]]
   :javac-options ["-target" "1.8" "-source" "1.8" "-Xlint:-options"]
 ; :resource-paths ["resources/org.clojars.nikonyrh.utilities-clj-0.1.2-standalone.jar"]
   :aot [taxi-rides-clj.core]

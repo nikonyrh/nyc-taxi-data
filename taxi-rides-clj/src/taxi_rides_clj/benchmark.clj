@@ -4,6 +4,8 @@
             [qbits.spandex :as s]
             [com.climate.claypoole :as cp]
             
+            [clojure.java.jdbc :as jdbc]
+            
             [nikonyrh-utilities-clj.core :as u]))
 
 (set! *warn-on-reflection* true)
@@ -151,8 +153,7 @@
     (doall (for [n-parallel                     n-parallels
                  [filter-name filter-generator] filter-generators
                  [aggregation-name aggregation] aggregations]
-             (let [_         nil ; (u/my-println "Started " [filter-name aggregation-name n-parallel])
-                   t-start   (System/nanoTime)
+             (let [t-start   (System/nanoTime)
                    results   (doall (cp/upfor n-parallel [i (range n-tries)] (benchmark-fn filter-generator aggregation)))
                    took      (-> (System/nanoTime) (- t-start) (* 0.000001) Math/round)
                    avg       (/ took n-tries 1.0)
@@ -235,7 +236,7 @@
                    
                    :histogram
                    (let [interval (-> agg-data :interval float)]
-                     [{:agg (format "FLOOR(%s / %.1f)" field interval)
+                     [{:agg (-> "FLOOR(%s / %.1f)" (format field interval) (clojure.string/replace ",", "."))
                        :col (gen-col-name "hist")}])
                    
                    :date_histogram
@@ -327,9 +328,33 @@
 ; (->> ((:from-to-time filters)) ((:paid-total-per-km-stats-by-company-and-day aggregations)) es-to-sql print)
 
 
+
+(defn benchmark-sql [& args]
+  (let [db-spec      {:connection-uri "jdbc:sqlserver://SERVER\\sql1;DATABASE=DB;integratedSecurity=true"}
+        benchmark-fn (fn [filter-generator aggregation]
+                       (let [sql     (->> (filter-generator) aggregation es-to-sql)
+                             t-start (System/nanoTime)
+                             result  (jdbc/query db-spec sql)
+                             t-end   (System/nanoTime)]
+                         {:took (- t-end t-start)
+                        ; :result result
+                          :hits (->> result (map :n_rows) (apply +))}))]
+    (apply run-benchmark benchmark-fn args)))
+
 (comment
-  (->> (for [[filter-name filter-generator] filters
-             [aggregation-name aggregation] aggregations]
+  (let [_       (Thread/sleep (* 1000 60 60 12))
+        results (benchmark-sql filters aggregations   5 [1])
+      ; results (benchmark-sql filters aggregations  50 [1])
+        results (benchmark-sql filters aggregations 500 [1])]
+    (->> results (map #(assoc % :db "MS SQL")) clojure.pprint/pprint with-out-str (spit "results_sql.edn"))
+    (println "")
+    (clojure.pprint/pprint results)))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(comment
+  (->> (for [[filter-name filter-generator] (sort-by first filters)
+             [aggregation-name aggregation] (sort-by first aggregations)]
          (->> (filter-generator) aggregation es-to-sql
               ((fn [[sql & args]] (apply format (clojure.string/replace sql #"\?" "%s")
                                                 (map #(if (string? %) (str \' % \') (str %)) args))))))
@@ -338,8 +363,8 @@
 
 
 (comment
-  (->> (for [[filter-name filter-generator] filters
-             [aggregation-name aggregation] aggregations]
+  (->> (for [[filter-name filter-generator] (sort-by first filters)
+             [aggregation-name aggregation] (sort-by first aggregations)]
          (aggregation (filter-generator)))
        (map json/write-str)
        (#(concat % ["" ""]))
