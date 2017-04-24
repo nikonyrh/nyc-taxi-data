@@ -17,14 +17,19 @@
 (defmacro my-println-f [& forms]
   `(my-println ~'file ": " ~@forms))
 
-(def data-folder (str (u/getenv "TAXI_DATA_FOLDER" "/home/wrecked/projects/taxi-rides/data") "/"))
-(defn find-files [re] (->> data-folder io/file file-seq (filter #(re-find re (.getName ^java.io.File %))) sort))
+(let [default (if (-> "os.name" System/getProperty (subs 0 7) (= "Windows"))
+                "C:/nikon/projects/clojure/nyc-taxi-data/data"
+                "/home/wrecked/projects/taxi-rides/data")]
+  (defn data-folder
+    ([]  (data-folder ""))
+    ([f] (str (u/getenv "TAXI_DATA_FOLDER" default) "/" f))))
+
+(defn find-files [re] (->> (data-folder) io/file file-seq (filter #(re-find re (.getName ^java.io.File %))) sort))
 
 (let [mapping (into {"date" :keyword} (zipmap ["prcp" "snwd" "snow" "tmax" "tmin" "awnd"] (repeat :float)))
       mapping (into {} (for [[k v] mapping] [(keyword k) [v (keyword (str "weather-" k))]]))
-      fname   (str data-folder "central_park_weather.csv")
       avg-wind-fix (fn [row] (update row :weather-awnd #(if-not (neg? %) %)))]
-  (u/read-csv-with-mapping :csv fname mapping
+  (u/read-csv-with-mapping :csv "central_park_weather.csv" mapping
     (def weather
       (->> (for [row rows]
                [(:weather-date row)
@@ -147,12 +152,12 @@
             drop-extra-fields))))
 
 (comment
-  (let [file (->> "yellow_tripdata_2010-02.csv.gz" (str data-folder))]
+  (let [file (data-folder "yellow_tripdata_2010-02.csv.gz")]
     (with-open [in (-> file clojure.java.io/input-stream java.util.zip.GZIPInputStream.)]
       (->> in io/reader line-seq (take 4)))))
 
 (comment
-  (let [file (->> "yellow_tripdata_2010-02.csv.gz" (str data-folder))]
+  (let [file (data-folder "yellow_tripdata_2010-02.csv.gz")]
     (u/read-csv-with-mapping :gz file csv-mapping
       (->> (rows->docs file rows) (take 3) clojure.pprint/pprint))))
 
@@ -183,7 +188,7 @@
           (my-println-f (str "finished, " @n-docs " rows"))
           {:generated @n-docs})))))
 
-;(extract-to-csv (str data-folder "green_tripdata_2013-08.csv.gz"))
+;(extract-to-csv (data-folder "green_tripdata_2013-08.csv.gz"))
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (def es-types
@@ -258,7 +263,7 @@
     (u/my-println "Started!")
     (create-taxicab-template)
     (do (->> (string/replace file #".+/" "")
-             (str data-folder)
+             (data-folder)
              ((main-funs f-name))
              (cp/upfor (Integer. ^String n-parallel) [file files])
              doall
